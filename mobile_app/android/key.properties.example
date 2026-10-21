@@ -1,0 +1,4 @@
+storePassword=replace-with-keystore-password
+keyPassword=replace-with-key-password
+keyAlias=voiceledger
+storeFile=C:/path/to/voiceledger-release.jks

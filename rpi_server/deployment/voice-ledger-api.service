@@ -1,0 +1,35 @@
+[Unit]
+Description=Voice Ledger API (FastAPI)
+Documentation=file:///opt/voice-ledger/rpi_server/README.md
+After=network-online.target mysql.service mongod.service
+Wants=network-online.target mysql.service mongod.service
+
+[Service]
+Type=simple
+User=voiceledger
+Group=voiceledger
+WorkingDirectory=/opt/voice-ledger/rpi_server
+EnvironmentFile=/opt/voice-ledger/rpi_server/.env
+ExecStart=/opt/voice-ledger/rpi_server/.venv/bin/uvicorn app.main:app \
+    --host 127.0.0.1 \
+    --port 8000 \
+    --workers 2 \
+    --proxy-headers \
+    --forwarded-allow-ips=127.0.0.1
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+
+# Least privilege. The application writes only backups; the database is remote
+# to this unit's filesystem view.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/backups/voice_ledger
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+
+[Install]
+WantedBy=multi-user.target

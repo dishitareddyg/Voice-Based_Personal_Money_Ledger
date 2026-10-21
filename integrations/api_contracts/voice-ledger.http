@@ -1,0 +1,238 @@
+@base = http://127.0.0.1:8000/api/v1
+@email = demo@example.com
+@password = S3curePass123
+@requestId = 8f14e45fceea167a5a36dedd4bea2543
+
+### Health (outside the API prefix)
+GET http://127.0.0.1:8000/health
+
+### Readiness
+GET http://127.0.0.1:8000/health/ready
+
+### Register
+# @name register
+POST {{base}}/auth/register
+Content-Type: application/json
+
+{
+  "full_name": "Demo User",
+  "email": "{{email}}",
+  "password": "{{password}}",
+  "timezone": "Asia/Kolkata"
+}
+
+### Login
+# @name login
+POST {{base}}/auth/login
+Content-Type: application/json
+
+{
+  "email": "{{email}}",
+  "password": "{{password}}"
+}
+
+### Token
+@token = {{login.response.body.$.access_token}}
+
+### Current profile
+GET {{base}}/auth/me
+Authorization: Bearer {{token}}
+
+### Dashboard summary
+GET {{base}}/dashboard/summary
+Authorization: Bearer {{token}}
+
+### Calendar for a month
+GET {{base}}/calendar?month=2026-10
+Authorization: Bearer {{token}}
+
+### Create income
+# @name income
+POST {{base}}/transactions
+Authorization: Bearer {{token}}
+Content-Type: application/json
+Idempotency-Key: {{requestId}}
+
+{
+  "request_id": "{{requestId}}",
+  "type": "income",
+  "amount": 5000.00,
+  "currency": "INR",
+  "description": "Smoke income",
+  "transaction_date": "2026-10-20"
+}
+
+### Replay the same request (must not credit twice)
+POST {{base}}/transactions
+Authorization: Bearer {{token}}
+Content-Type: application/json
+Idempotency-Key: {{requestId}}
+
+{
+  "request_id": "{{requestId}}",
+  "type": "income",
+  "amount": 5000.00,
+  "currency": "INR",
+  "description": "Smoke income",
+  "transaction_date": "2026-10-20"
+}
+
+### Create a voice command (the Flutter contract)
+# @name voiceExpense
+POST {{base}}/commands
+Authorization: Bearer {{token}}
+Content-Type: application/json
+Idempotency-Key: 5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f
+
+{
+  "request_id": "5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f",
+  "intent": "CREATE_EXPENSE",
+  "original_amount": 2000.00,
+  "original_currency": "INR",
+  "category": "Groceries",
+  "transaction_date": "2026-10-20",
+  "description": "Weekly groceries",
+  "voice_text": "I spent 2000 rupees on groceries",
+  "parser_confidence": 0.97
+}
+
+### Replay the voice command (must not debit twice)
+POST {{base}}/commands
+Authorization: Bearer {{token}}
+Content-Type: application/json
+Idempotency-Key: 5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f
+
+{
+  "request_id": "5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f",
+  "intent": "CREATE_EXPENSE",
+  "original_amount": 2000.00,
+  "original_currency": "INR",
+  "category": "Groceries",
+  "transaction_date": "2026-10-20",
+  "description": "Weekly groceries",
+  "voice_text": "I spent 2000 rupees on groceries",
+  "parser_confidence": 0.97
+}
+
+### Rejected voice command (insufficient balance)
+POST {{base}}/commands
+Authorization: Bearer {{token}}
+Content-Type: application/json
+Idempotency-Key: 6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f10
+
+{
+  "request_id": "6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f10",
+  "intent": "CREATE_EXPENSE",
+  "original_amount": 100000.00,
+  "original_currency": "INR",
+  "category": "Groceries",
+  "transaction_date": "2026-10-20",
+  "description": "Too expensive",
+  "voice_text": "I spent 100000 rupees on groceries"
+}
+
+### Create expense with a new category
+POST {{base}}/expenses
+Authorization: Bearer {{token}}
+Content-Type: application/json
+Idempotency-Key: 2f1c9a7e5b3d4c6a8e0f1b2c3d4e5f60
+
+{
+  "request_id": "2f1c9a7e5b3d4c6a8e0f1b2c3d4e5f60",
+  "amount": 250.00,
+  "currency": "INR",
+  "description": "Lunch",
+  "category_name": "Food",
+  "transaction_date": "2026-10-20"
+}
+
+### Lend money (creates a loan)
+# @name lending
+POST {{base}}/lending
+Authorization: Bearer {{token}}
+Content-Type: application/json
+Idempotency-Key: 3a2b1c4d5e6f7a8b9c0d1e2f3a4b5c6d
+
+{
+  "request_id": "3a2b1c4d5e6f7a8b9c0d1e2f3a4b5c6d",
+  "amount": 300.00,
+  "currency": "INR",
+  "description": "Short-term loan",
+  "person_name": "Ravi",
+  "due_date": "2026-11-19",
+  "transaction_date": "2026-10-20"
+}
+
+### Repay part of the loan
+POST {{base}}/repayments
+Authorization: Bearer {{token}}
+Content-Type: application/json
+Idempotency-Key: 4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e
+
+{
+  "request_id": "4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e",
+  "amount": 100.00,
+  "currency": "INR",
+  "person_name": "Ravi",
+  "repayment_direction": "received",
+  "transaction_date": "2026-10-20"
+}
+
+### List loans
+GET {{base}}/loans?kind=lent
+Authorization: Bearer {{token}}
+
+### List repayments
+GET {{base}}/repayments?limit=20
+Authorization: Bearer {{token}}
+
+### List transactions
+GET {{base}}/transactions?page=1&page_size=20
+Authorization: Bearer {{token}}
+
+### Filter expenses
+GET {{base}}/transactions?type=expense&page=1&page_size=10
+Authorization: Bearer {{token}}
+
+### People
+GET {{base}}/persons
+Authorization: Bearer {{token}}
+
+### Create a person
+POST {{base}}/persons
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "name": "Asha",
+  "phone": "+91-90000-00002",
+  "notes": "Colleague"
+}
+
+### Categories
+GET {{base}}/categories
+Authorization: Bearer {{token}}
+
+### Create a category
+POST {{base}}/categories
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "name": "Utilities",
+  "type": "expense",
+  "color_hex": "#457B9D",
+  "icon": "bolt"
+}
+
+### Admin: database statistics (admin token + password + confirm)
+POST {{base}}/admin/actions
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "action": "DATABASE_STATS",
+  "password": "Admin@12345",
+  "confirm": true,
+  "parameters": {}
+}
