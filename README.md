@@ -134,12 +134,12 @@ documented in `rpi_server/deployment/README.md`.
 
 | Email | Password | Role |
 | --- | --- | --- |
-| `demo@voiceledger.local` | `Demo@12345` | user |
+| `demo@voiceledger.in` | `Demo@12345` | user |
 
 For an administrator, either set `ADMIN_EMAIL` and `ADMIN_PASSWORD` in `.env` before
 starting the API (the bootstrap creates or promotes that account), or run
 `rpi_server/sql/seed/001_seed.sql`, which inserts
-`admin@voiceledger.local / Admin@12345`. Delete or rotate these accounts before
+`admin@voiceledger.in / Admin@12345`. Delete or rotate these accounts before
 exposing the server.
 
 ## DBMS demonstration on Raspberry Pi

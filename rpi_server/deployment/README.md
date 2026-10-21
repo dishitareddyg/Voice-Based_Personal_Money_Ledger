@@ -207,8 +207,8 @@ sudo -u voiceledger .venv/bin/python -m app.scripts.seed_demo
 
 Demo accounts created by the Python seed:
 
-- Admin: `admin@voiceledger.local` / `Admin@12345`
-- Normal user: `demo@voiceledger.local` / `Demo@12345`
+- Admin: `admin@voiceledger.in` / `Admin@12345`
+- Normal user: `demo@voiceledger.in` / `Demo@12345`
 
 The SQL seed in `sql/seed/001_seed.sql` uses the same demo accounts. Do not run
 both seeds against a fresh database because the IDs and emails overlap.
@@ -348,7 +348,7 @@ curl -s https://ledger.example.com/health/ready
 curl -s https://ledger.example.com/docs -o /dev/null -w '%{http_code}\n'
 curl -s -X POST https://ledger.example.com/api/v1/auth/login \
   -H 'Content-Type: application/json' \
-  -d '{"email":"demo@voiceledger.local","password":"Demo@12345"}'
+  -d '{"email":"demo@voiceledger.in","password":"Demo@12345"}'
 ```
 
 Run the live integration suite from the repository root:

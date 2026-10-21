@@ -123,8 +123,8 @@ def test_seed_matches_demo_fixtures() -> None:
     seed = (SQL_ROOT / "seed" / "001_seed.sql").read_text(encoding="utf-8")
     assert len(_CATEGORIES) == 11
     assert len(_PERSONS) == 4
-    assert "admin@voiceledger.local" in seed
-    assert "demo@voiceledger.local" in seed
+    assert "admin@voiceledger.in" in seed
+    assert "demo@voiceledger.in" in seed
     assert seed.count("INSERT INTO loans") == 1
     assert "'Ravi Kumar'" in seed
     assert "'Priya Sharma'" in seed

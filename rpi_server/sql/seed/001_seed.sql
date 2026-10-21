@@ -2,8 +2,8 @@
 -- Demo seed data. Run once on a fresh database.
 --
 -- Two accounts are created:
---   admin@voiceledger.local / Admin@12345
---   demo@voiceledger.local  / Demo@12345
+--   admin@voiceledger.in / Admin@12345
+--   demo@voiceledger.in  / Demo@12345
 --
 -- Regenerate password hashes with:
 --   python -m app.scripts.hash_password "YourPassword"
@@ -24,10 +24,10 @@ INSERT INTO users
   (id, full_name, email, password_hash, role, is_active, timezone,
    created_at, updated_at)
 VALUES
-  (1, 'Ledger Administrator', 'admin@voiceledger.local',
+  (1, 'Ledger Administrator', 'admin@voiceledger.in',
    '$argon2id$v=19$m=19456,t=2,p=1$QWzh9O0svICTK4Ol7br4lg$KGd6YiMQpFbgg4ulRTa1xxUlZdSKaPA93Bm9+GGDsv4',
    'admin', TRUE, 'Asia/Kolkata', UTC_TIMESTAMP(), UTC_TIMESTAMP()),
-  (2, 'Demo User', 'demo@voiceledger.local',
+  (2, 'Demo User', 'demo@voiceledger.in',
    '$argon2id$v=19$m=19456,t=2,p=1$RWlGEC+DlZaE5JfeuzWyVQ$LLg7hME5PzFDhxNAHZYH2T+E9PpFJ0D7YOk+gA5n0PQ',
    'user', TRUE, 'Asia/Kolkata', UTC_TIMESTAMP(), UTC_TIMESTAMP());
 

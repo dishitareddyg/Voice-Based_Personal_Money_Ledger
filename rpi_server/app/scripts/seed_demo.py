@@ -33,7 +33,7 @@ from app.repositories import category_repository, user_repository
 from app.schemas.transaction import TransactionCreate
 from app.services import directory_service, transaction_service
 
-DEMO_EMAIL = "demo@voiceledger.local"
+DEMO_EMAIL = "demo@voiceledger.in"
 DEMO_PASSWORD = "Demo@12345"
 DEMO_NAME = "Demo User"
 

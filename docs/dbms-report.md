@@ -519,8 +519,8 @@ reference SQL seed.
 
 | Email | Password | Role | Source |
 | --- | --- | --- | --- |
-| `demo@voiceledger.local` | `Demo@12345` | user | `seed_demo.py` |
-| `admin@voiceledger.local` | `Admin@12345` | admin | `sql/seed/001_seed.sql` |
+| `demo@voiceledger.in` | `Demo@12345` | user | `seed_demo.py` |
+| `admin@voiceledger.in` | `Admin@12345` | admin | `sql/seed/001_seed.sql` |
 
 ## Appendix B: Report query map
 
