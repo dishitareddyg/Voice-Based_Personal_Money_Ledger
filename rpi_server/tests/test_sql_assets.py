@@ -6,7 +6,6 @@ import sqlglot
 from sqlglot import exp
 from sqlglot.optimizer.qualify import qualify
 
-from app.database.mongodb.client import COLLECTIONS
 from app.scripts.seed_demo import _CATEGORIES, _PERSONS
 
 SERVER_ROOT = Path(__file__).resolve().parents[1]
@@ -136,13 +135,20 @@ def test_seed_matches_demo_fixtures() -> None:
     assert "UPDATE transactions SET loan_id = 3 WHERE id = 14;" in seed
 
 
-def test_mongodb_collection_contract() -> None:
-    assert COLLECTIONS == (
-        "voice_commands",
-        "audit_logs",
-        "exchange_rates",
-        "application_events",
+def test_support_tables_are_in_reference_schema() -> None:
+    schema = (SQL_ROOT / "schema" / "001_schema.sql").read_text(
+        encoding="utf-8"
     )
+    for table in (
+        "VOICE_COMMAND",
+        "AUDIT_LOG",
+        "APPLICATION_EVENT",
+        "EXCHANGE_RATE_CACHE",
+    ):
+        assert f"CREATE TABLE IF NOT EXISTS {table}" in schema
+    assert "uq_voice_command_user_request" in schema
+    assert "uq_exchange_rate_cache_pair" in schema
+    assert "JSON" in schema
 
 
 def test_required_documentation_exists() -> None:

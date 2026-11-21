@@ -16,15 +16,19 @@ from app.core.config import get_settings
 from app.core.enums import AdminAction, ErrorCode
 from app.core.errors import AppError
 from app.core.security import verify_password
-from app.core.time import utc_now
-from app.database.mongodb.client import get_mongo_database
+from app.core.time import utc_now, utc_now_naive
+from app.models.application_event import ApplicationEvent
+from app.models.audit_log import AuditLog
 from app.models.category import Category
+from app.models.exchange_rate_cache import ExchangeRateCache
 from app.models.interest_scheme import InterestScheme
 from app.models.loan import Loan
 from app.models.person import Person
 from app.models.repayment import Repayment
 from app.models.transaction import Transaction
 from app.models.user import User
+from app.models.voice_command import VoiceCommand
+from app.repositories import exchange_rate_repository
 from app.schemas.admin import AdminActionRequest, AdminActionResponse
 from app.services import audit_service
 
@@ -37,6 +41,10 @@ _OPTIMIZE_TABLES = (
     "loans",
     "transactions",
     "repayments",
+    "VOICE_COMMAND",
+    "AUDIT_LOG",
+    "APPLICATION_EVENT",
+    "EXCHANGE_RATE_CACHE",
 )
 
 _MESSAGE = {
@@ -84,7 +92,7 @@ def run_action(
     elif action is AdminAction.OPTIMIZE_INDEXES:
         details = _optimize_indexes(db)
     elif action is AdminAction.PRUNE_RATE_CACHE:
-        details = _prune_rate_cache()
+        details = _prune_rate_cache(db)
     else:  # pragma: no cover - enum makes this unreachable
         raise AppError(
             ErrorCode.UNSUPPORTED_ACTION,
@@ -154,33 +162,28 @@ def _database_stats(db: Session) -> dict[str, object]:
         for row in table_rows
     ]
 
-    mongo: dict[str, object] = {}
+    supporting: dict[str, object] = {}
     try:
-        database = get_mongo_database().database
-        mongo = {
-            "voice_commands": int(
-                database["voice_commands"].estimated_document_count()
-            ),
-            "audit_logs": int(
-                database["audit_logs"].estimated_document_count()
-            ),
-            "exchange_rates": int(
-                database["exchange_rates"].estimated_document_count()
-            ),
-            "application_events": int(
-                database["application_events"].estimated_document_count()
-            ),
+        supporting = {
+            name: int(db.scalar(select(func.count()).select_from(model)) or 0)
+            for name, model in (
+                ("voice_commands", VoiceCommand),
+                ("audit_logs", AuditLog),
+                ("exchange_rates", ExchangeRateCache),
+                ("application_events", ApplicationEvent),
+            )
         }
     except Exception as exc:
-        logger.warning("Could not read MongoDB statistics: %s", exc)
-        mongo = {"status": "unavailable"}
+        logger.warning("Could not read supporting-table statistics: %s", exc)
+        db.rollback()
+        supporting = {"status": "unavailable"}
 
     return {
         "mysql_version": version,
         "database": database_name,
         "counts": counts,
         "tables": tables,
-        "mongodb": mongo,
+        "supporting_tables": supporting,
     }
 
 
@@ -341,15 +344,15 @@ def _optimize_indexes(db: Session) -> dict[str, object]:
     return {"tables": results}
 
 
-def _prune_rate_cache() -> dict[str, object]:
+def _prune_rate_cache(db: Session) -> dict[str, object]:
     try:
-        result = get_mongo_database().database[
-            "exchange_rates"
-        ].delete_many({"valid_until": {"$lt": utc_now()}})
+        deleted = exchange_rate_repository.delete_expired(db, utc_now_naive())
+        db.commit()
     except Exception as exc:
+        db.rollback()
         raise AppError(
             ErrorCode.SERVICE_UNAVAILABLE,
             "The exchange-rate cache could not be pruned.",
             status_code=503,
         ) from exc
-    return {"deleted": int(result.deleted_count)}
+    return {"deleted": deleted}

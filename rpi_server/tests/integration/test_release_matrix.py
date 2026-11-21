@@ -1,4 +1,4 @@
-"""Release-gate checks that require live MySQL and MongoDB.
+"""Release-gate checks that require live MySQL 8.
 
 These cover the cases that unit/contract tests cannot prove: real persistence,
 database constraints, cross-user isolation, admin password verification and a
@@ -7,21 +7,22 @@ non-INR transaction through the live exchange-rate provider.
 
 from __future__ import annotations
 
+import json
 import os
+import time
 import uuid
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.exc import IntegrityError
 
 from app.core.security import create_access_token
 from app.core.time import utc_now
-from app.database.mongodb.client import get_mongo_database
 from app.database.mysql.session import engine
 
 if os.getenv("RUN_INTEGRATION") != "1":
     pytest.skip(
-        "Set RUN_INTEGRATION=1 with live MySQL and MongoDB to run.",
+        "Set RUN_INTEGRATION=1 with live MySQL 8 to run.",
         allow_module_level=True,
     )
 
@@ -182,11 +183,22 @@ def test_admin_password_and_explicit_confirmation(client) -> None:
     assert completed.status_code == 200, completed.text
     assert completed.json()["action"] == "DATABASE_STATS"
 
-    audit = get_mongo_database().database["audit_logs"].find_one(
-        {"user_id": user_id, "event_type": "admin_action"}
-    )
-    assert audit is not None
-    assert audit["payload"]["action"] == "DATABASE_STATS"
+    with engine.connect() as connection:
+        raw = connection.execute(
+            text(
+                "SELECT payload FROM AUDIT_LOG "
+                "WHERE user_id = :u AND event_type = 'admin_action'"
+            ),
+            {"u": user_id},
+        ).scalar_one()
+    assert json.loads(raw)["action"] == "DATABASE_STATS"
+    details = completed.json()["details"]
+    assert set(details["supporting_tables"]) == {
+        "voice_commands",
+        "audit_logs",
+        "exchange_rates",
+        "application_events",
+    }
 
 
 def test_invalid_person_category_and_repayment_are_audited(client) -> None:
@@ -228,16 +240,21 @@ def test_invalid_person_category_and_repayment_are_audited(client) -> None:
         "repayment_direction": "received",
     }
     request_ids.append(invalid_repayment["request_id"])
+    started = time.monotonic()
     response = _command(client, headers, invalid_repayment)
+    # Regression guard: the rejection audit must not wait on the user-row lock.
+    assert time.monotonic() - started < 5
     assert response.status_code == 422
     assert response.json()["error_code"] == "LOAN_NOT_FOUND"
 
-    audit_count = get_mongo_database().database["audit_logs"].count_documents(
-        {
-            "event_type": "transaction_rejected",
-            "request_id": {"$in": request_ids},
-        }
-    )
+    with engine.connect() as connection:
+        audit_count = connection.execute(
+            text(
+                "SELECT COUNT(*) FROM AUDIT_LOG WHERE event_type = "
+                "'transaction_rejected' AND request_id IN :ids"
+            ).bindparams(bindparam("ids", expanding=True)),
+            {"ids": request_ids},
+        ).scalar_one()
     assert audit_count == 3
 
 
@@ -295,7 +312,7 @@ def test_password_hash_constraints_and_transaction_atomicity(client) -> None:
     assert statement["items"][0]["request_id"] == request_id
 
 
-def test_live_currency_conversion_and_mongodb_cache(client) -> None:
+def test_live_currency_conversion_and_rate_cache(client) -> None:
     _, registration, headers = _register(client, "fx")
     body = {
         "request_id": uuid.uuid4().hex,
@@ -313,15 +330,16 @@ def test_live_currency_conversion_and_mongodb_cache(client) -> None:
     assert float(payload["exchange_rate_to_inr"]) > 0
     assert float(payload["amount_inr"]) > 10
 
-    cache = get_mongo_database().database["exchange_rates"].find_one(
-        {
-            "base_currency": "USD",
-            "target_currency": "INR",
-            "valid_until": {"$gt": utc_now()},
-        }
-    )
-    assert cache is not None
-    assert cache["rate"].to_decimal() > 0
-    assert cache["provider"]
-    assert cache["retrieved_at"]
-    assert cache["valid_until"]
+    with engine.connect() as connection:
+        cache = connection.execute(
+            text(
+                "SELECT rate, provider, retrieved_at, valid_until "
+                "FROM EXCHANGE_RATE_CACHE WHERE base_currency = 'USD' "
+                "AND target_currency = 'INR' AND valid_until > :now"
+            ),
+            {"now": utc_now().replace(tzinfo=None)},
+        ).one()
+    assert cache.rate > 0
+    assert cache.provider
+    assert cache.retrieved_at
+    assert cache.valid_until

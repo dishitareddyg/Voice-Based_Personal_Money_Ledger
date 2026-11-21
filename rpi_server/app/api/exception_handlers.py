@@ -5,7 +5,6 @@ import logging
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from pymongo.errors import PyMongoError
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -85,18 +84,6 @@ def register_exception_handlers(app: FastAPI) -> None:
             content=error_payload(
                 ErrorCode.DATABASE_ERROR,
                 "A database error occurred. Please try again.",
-                request_id=get_request_id(),
-            ),
-        )
-
-    @app.exception_handler(PyMongoError)
-    async def _mongo_error(_: Request, exc: PyMongoError) -> JSONResponse:
-        logger.exception("MongoDB error", exc_info=exc)
-        return JSONResponse(
-            status_code=503,
-            content=error_payload(
-                ErrorCode.SERVICE_UNAVAILABLE,
-                "The analytics store is unavailable.",
                 request_id=get_request_id(),
             ),
         )

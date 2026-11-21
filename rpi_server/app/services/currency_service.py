@@ -2,77 +2,66 @@ from __future__ import annotations
 
 import logging
 from datetime import timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 import httpx
-from bson.decimal128 import Decimal128
-from pymongo.errors import PyMongoError
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.core.config import get_settings
 from app.core.enums import ErrorCode
 from app.core.errors import AppError
-from app.core.time import utc_now
-from app.database.mongodb.client import get_mongo_database
+from app.core.time import utc_now_naive
+from app.database.mysql.session import SessionLocal
+from app.models.exchange_rate_cache import RATE_PRECISION, RATE_SCALE
+from app.repositories import exchange_rate_repository
 
 logger = logging.getLogger(__name__)
 
-_COLLECTION = "exchange_rates"
+_RATE_QUANTUM = Decimal(1).scaleb(-RATE_SCALE)
+_RATE_LIMIT = Decimal(10) ** (RATE_PRECISION - RATE_SCALE)
 
 
-def _as_decimal(value: object) -> Decimal:
-    if isinstance(value, Decimal128):
-        return value.to_decimal()
-    return Decimal(str(value))
-
-
-def _collection():
-    return get_mongo_database().database[_COLLECTION]
+def _normalise_rate(rate: Decimal) -> Decimal | None:
+    """Round to the stored scale; None if unusable (non-finite, <=0, huge)."""
+    if not rate.is_finite() or rate <= 0 or rate >= _RATE_LIMIT:
+        return None
+    rate = rate.quantize(_RATE_QUANTUM, rounding=ROUND_HALF_UP)
+    return rate if rate > 0 else None
 
 
 def _read_cache(base: str, target: str) -> Decimal | None:
     try:
-        document = _collection().find_one(
-            {
-                "base_currency": base,
-                "target_currency": target,
-                "valid_until": {"$gt": utc_now()},
-            },
-            sort=[("valid_until", -1)],
-        )
-    except PyMongoError as exc:  # cache is optional; the provider is canonical
+        with SessionLocal() as db:
+            rate = exchange_rate_repository.get_valid_rate(
+                db, base, target, utc_now_naive()
+            )
+    except SQLAlchemyError as exc:  # cache is optional; provider is canonical
         logger.warning("Exchange-rate cache unavailable: %s", exc)
         return None
-    if not document:
+    if rate is None or not rate.is_finite() or rate <= 0:
         return None
-    try:
-        rate = _as_decimal(document["rate"])
-    except (KeyError, ValueError):
-        return None
-    return rate if rate > 0 else None
+    return rate
 
 
 def _write_cache(
     base: str, target: str, rate: Decimal, provider: str
 ) -> None:
     settings = get_settings()
-    now = utc_now()
+    now = utc_now_naive()
     try:
-        _collection().update_one(
-            {"base_currency": base, "target_currency": target},
-            {
-                "$set": {
-                    "base_currency": base,
-                    "target_currency": target,
-                    "rate": Decimal128(rate),
-                    "provider": provider,
-                    "retrieved_at": now,
-                    "valid_until": now
-                    + timedelta(minutes=settings.exchange_rate_cache_minutes),
-                }
-            },
-            upsert=True,
-        )
-    except PyMongoError as exc:
+        with SessionLocal() as db:
+            exchange_rate_repository.upsert_rate(
+                db,
+                base=base,
+                target=target,
+                rate=rate,
+                provider=provider[:255],
+                retrieved_at=now,
+                valid_until=now
+                + timedelta(minutes=settings.exchange_rate_cache_minutes),
+            )
+            db.commit()
+    except SQLAlchemyError as exc:
         logger.warning("Could not cache exchange rate: %s", exc)
 
 
@@ -103,14 +92,15 @@ def _fetch_rate(base: str, target: str) -> Decimal:
             status_code=503,
         )
     try:
-        rate = Decimal(str(raw_rate))
+        parsed = Decimal(str(raw_rate))
     except (ValueError, ArithmeticError) as exc:
         raise AppError(
             ErrorCode.EXCHANGE_RATE_UNAVAILABLE,
             "The exchange-rate provider returned an invalid rate.",
             status_code=503,
         ) from exc
-    if rate <= 0:
+    rate = _normalise_rate(parsed)
+    if rate is None:
         raise AppError(
             ErrorCode.EXCHANGE_RATE_UNAVAILABLE,
             "The exchange-rate provider returned an invalid rate.",

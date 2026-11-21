@@ -9,7 +9,11 @@
 -- `income`, `expenses` and `savings` relations are read-only views defined in
 -- 002_views.sql; keeping one physical ledger avoids update anomalies.
 --
--- Alembic migration 0001_initial + 0002_dbms_layer creates the same objects.
+-- Alembic migrations 0001_initial, 0002_dbms_layer and 0003_support_tables
+-- create the same objects. MySQL is the only database: voice-command
+-- metadata, audit/application events and the FX cache live in the four
+-- upper-case support tables at the end of this file (names are case-sensitive
+-- on Linux).
 -- ===========================================================================
 
 CREATE DATABASE IF NOT EXISTS voice_ledger
@@ -255,4 +259,93 @@ CREATE TABLE IF NOT EXISTS repayments (
     REFERENCES transactions (id) ON DELETE CASCADE,
   CONSTRAINT fk_repayments_person FOREIGN KEY (person_id)
     REFERENCES persons (id) ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+-- ---------------------------------------------------------------------------
+-- Support tables (migration 0003_support_tables)
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS VOICE_COMMAND (
+  id                BIGINT       NOT NULL AUTO_INCREMENT,
+  user_id           BIGINT       NOT NULL,
+  request_id        VARCHAR(64)  NOT NULL,
+  voice_text        TEXT         NOT NULL,
+  parser_confidence DOUBLE       NULL,
+  transaction_id    BIGINT       NULL,
+  nlp               JSON         NOT NULL,
+  source            VARCHAR(64)  NOT NULL DEFAULT 'android_speech_recognizer',
+  created_at        DATETIME(6)  NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_voice_command_user_request (user_id, request_id),
+  KEY ix_voice_command_user_created (user_id, created_at),
+  KEY ix_voice_command_transaction (transaction_id),
+  CONSTRAINT ck_voice_command_confidence CHECK (
+    parser_confidence IS NULL
+    OR (parser_confidence >= 0 AND parser_confidence <= 1)
+  ),
+  CONSTRAINT ck_voice_command_request_id_length CHECK (
+    CHAR_LENGTH(request_id) >= 8
+  ),
+  CONSTRAINT fk_voice_command_user FOREIGN KEY (user_id)
+    REFERENCES users (id) ON DELETE CASCADE,
+  CONSTRAINT fk_voice_command_transaction FOREIGN KEY (transaction_id)
+    REFERENCES transactions (id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS AUDIT_LOG (
+  id          BIGINT       NOT NULL AUTO_INCREMENT,
+  event_type  VARCHAR(64)  NOT NULL,
+  user_id     BIGINT       NULL,
+  request_id  VARCHAR(128) NULL,
+  ip_address  VARCHAR(45)  NULL,
+  user_agent  VARCHAR(512) NULL,
+  payload     JSON         NULL,
+  created_at  DATETIME(6)  NOT NULL,
+  PRIMARY KEY (id),
+  KEY ix_audit_log_user_created (user_id, created_at),
+  KEY ix_audit_log_request (request_id),
+  KEY ix_audit_log_event_created (event_type, created_at),
+  CONSTRAINT ck_audit_log_event_type CHECK (
+    CHAR_LENGTH(TRIM(event_type)) > 0
+  ),
+  CONSTRAINT fk_audit_log_user FOREIGN KEY (user_id)
+    REFERENCES users (id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS APPLICATION_EVENT (
+  id          BIGINT       NOT NULL AUTO_INCREMENT,
+  event_type  VARCHAR(64)  NOT NULL,
+  user_id     BIGINT       NULL,
+  request_id  VARCHAR(128) NULL,
+  ip_address  VARCHAR(45)  NULL,
+  user_agent  VARCHAR(512) NULL,
+  payload     JSON         NULL,
+  created_at  DATETIME(6)  NOT NULL,
+  PRIMARY KEY (id),
+  KEY ix_application_event_user_created (user_id, created_at),
+  KEY ix_application_event_request (request_id),
+  KEY ix_application_event_event_created (event_type, created_at),
+  CONSTRAINT ck_application_event_event_type CHECK (
+    CHAR_LENGTH(TRIM(event_type)) > 0
+  ),
+  CONSTRAINT fk_application_event_user FOREIGN KEY (user_id)
+    REFERENCES users (id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+CREATE TABLE IF NOT EXISTS EXCHANGE_RATE_CACHE (
+  id              BIGINT         NOT NULL AUTO_INCREMENT,
+  base_currency   VARCHAR(3)     NOT NULL,
+  target_currency VARCHAR(3)     NOT NULL,
+  rate            DECIMAL(28,12) NOT NULL,
+  provider        VARCHAR(255)   NOT NULL,
+  retrieved_at    DATETIME(6)    NOT NULL,
+  valid_until     DATETIME(6)    NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_exchange_rate_cache_pair (base_currency, target_currency),
+  KEY ix_exchange_rate_cache_valid_until (valid_until),
+  CONSTRAINT ck_exchange_rate_cache_rate CHECK (rate > 0),
+  CONSTRAINT ck_exchange_rate_cache_currency CHECK (
+    CHAR_LENGTH(base_currency) = 3 AND CHAR_LENGTH(target_currency) = 3
+  ),
+  CONSTRAINT ck_exchange_rate_cache_validity CHECK (valid_until >= retrieved_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;

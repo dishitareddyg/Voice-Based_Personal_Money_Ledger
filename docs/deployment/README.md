@@ -5,16 +5,15 @@ Full Raspberry Pi checklist:
 
 ## Steps
 
-1. Install Raspberry Pi OS 64-bit, Python 3.11+, Nginx, MySQL 8.0 from the
-   ARM64 generic tarball (Debian Bookworm APT provides MariaDB, not MySQL), and
-   MongoDB 7.0 from the official ARM64 repository.
-2. Create the `voice_ledger` database/user and a dedicated OS service account.
+1. Install Raspberry Pi OS 64-bit, Python 3.11+, Nginx, and MySQL 8.0 from the
+   ARM64 generic tarball (Debian Bookworm APT provides MariaDB, not MySQL).
+2. Apply `rpi_server/deployment/mysql-pi-2gb.cnf` for a 2 GB board, then create
+   the `voice_ledger` database/user and a dedicated OS service account.
 3. Copy `rpi_server/`, create `.venv`, and install
    `requirements-dev.txt` (or `requirements.txt` in production).
-4. Configure `.env` with MySQL, MongoDB, a strong `JWT_SECRET_KEY`, optional
+4. Configure `.env` with MySQL, a strong `JWT_SECRET_KEY`, optional
    `ADMIN_EMAIL`/`ADMIN_PASSWORD`, and `BACKUP_DIR`.
-5. Run `alembic upgrade head`, `python -m app.scripts.seed_demo` and
-   `python -m app.scripts.init_mongo`.
+5. Run `alembic upgrade head` and `python -m app.scripts.seed_demo`.
 6. Install `deployment/voice-ledger-api.service` and
    `deployment/nginx.conf`; obtain a TLS certificate.
 7. Bind Uvicorn to `127.0.0.1:8000`; expose only ports 80/443.
@@ -29,9 +28,8 @@ Normal application setup:
 
 ```bash
 cd rpi_server
-alembic upgrade head
+alembic upgrade head          # includes 0003_supporting_tables
 python -m app.scripts.seed_demo
-python -m app.scripts.init_mongo
 ```
 
 Reference DBMS setup (fresh database only):
@@ -51,12 +49,11 @@ data.
 ```bash
 cd rpi_server
 ruff check app tests alembic
-pytest -q
+pytest -q            # 66 passed, 2 gated integration tests skipped
 python -m compileall -q app tests alembic
-# Requires live MySQL + MongoDB and a migrated test database.
+# Requires live MySQL and a migrated test database.
 # Set TEST_DATABASE_URL when it is not 127.0.0.1:3306.
 RUN_INTEGRATION=1 pytest -m integration
-# Current result: 62 passed with live MySQL 8.0.46 + MongoDB 7.0.37.
 ```
 
 ```bash
@@ -66,5 +63,6 @@ flutter test
 ```
 
 Back up MySQL with the admin `CREATE_BACKUP` action or a scheduled
-`mysqldump --single-transaction`. MongoDB is not authoritative and can be
-rebuilt with `init_mongo`.
+`mysqldump --single-transaction`. The dump includes the four supporting tables;
+a lost audit or FX row never changes a balance. Legacy MongoDB exports can be
+loaded with `python -m app.scripts.import_legacy_supporting_export`.

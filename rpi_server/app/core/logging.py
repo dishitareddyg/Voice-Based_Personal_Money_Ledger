@@ -23,6 +23,5 @@ def configure_logging(level: str = "INFO") -> None:
     for handler in root.handlers:
         if not any(isinstance(f, _RequestIdFilter) for f in handler.filters):
             handler.addFilter(_RequestIdFilter())
-    logging.getLogger("pymongo").setLevel(logging.WARNING)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)

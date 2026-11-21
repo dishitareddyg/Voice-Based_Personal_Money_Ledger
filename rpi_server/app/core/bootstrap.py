@@ -1,4 +1,4 @@
-"""Idempotent startup tasks (bootstrap administrator, Mongo indexes)."""
+"""Idempotent startup tasks (bootstrap administrator)."""
 
 from __future__ import annotations
 

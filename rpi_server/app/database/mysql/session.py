@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
+from typing import Any
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -11,12 +13,19 @@ from app.core.config import get_settings
 
 _settings = get_settings()
 
+
+def _json_dumps(value: Any) -> str:
+    """Serialise JSON columns; Decimal/datetime/UUID values become strings."""
+    return json.dumps(value, default=str, ensure_ascii=False)
+
+
 engine = create_engine(
     _settings.sqlalchemy_url,
     pool_pre_ping=True,
     pool_recycle=280,
-    pool_size=5,
-    max_overflow=10,
+    pool_size=_settings.db_pool_size,
+    max_overflow=_settings.db_max_overflow,
+    json_serializer=_json_dumps,
     echo=False,
     future=True,
 )
@@ -40,3 +49,8 @@ def get_db() -> Iterator[Session]:
         raise
     finally:
         session.close()
+
+
+def dispose_engine() -> None:
+    """Close pooled connections (application shutdown)."""
+    engine.dispose()

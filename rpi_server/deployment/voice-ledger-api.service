@@ -1,8 +1,8 @@
 [Unit]
 Description=Voice Ledger API (FastAPI)
 Documentation=file:///opt/voice-ledger/rpi_server/README.md
-After=network-online.target mysql.service mongod.service
-Wants=network-online.target mysql.service mongod.service
+After=network-online.target mysql.service
+Wants=network-online.target mysql.service
 
 [Service]
 Type=simple
@@ -20,8 +20,12 @@ Restart=on-failure
 RestartSec=5
 TimeoutStopSec=20
 
-# Least privilege. The application writes only backups; the database is remote
-# to this unit's filesystem view.
+# Keep the API from starving MySQL on a 2 GB Pi (2 workers ~ 100-150 MB each).
+MemoryHigh=450M
+MemoryMax=600M
+
+# Least privilege. The application writes only backups; MySQL is reached over
+# loopback and is outside this unit's filesystem view.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

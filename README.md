@@ -3,8 +3,9 @@
 A DBMS project that turns spoken financial entries into a secure, server-authoritative
 ledger. A Flutter Android app captures speech, parses the confirmed text locally with
 deterministic rules, and sends structured JSON over HTTPS to a FastAPI service running
-on a Raspberry Pi 4B. The Pi stores financial data in MySQL 8.x and keeps audit,
-NLP metadata and exchange-rate cache documents in MongoDB.
+on a Raspberry Pi 4B. The Pi stores all financial data and supporting metadata
+(voice commands, audit/application events and the exchange-rate cache) in a
+single MySQL 8.x database.
 
 Raw audio never leaves the phone. Only the text the user confirms is uploaded, and the
 server is the only component allowed to validate balances, mutate loans or convert
@@ -16,8 +17,7 @@ currency.
 | --- | --- | --- |
 | Mobile app (`mobile_app/`) | Flutter, Dart, Material 3, Riverpod, go_router, Dio | Speech capture, on-device parsing, review UI, HTTPS client |
 | API server (`rpi_server/`) | Python 3.11+, FastAPI, SQLAlchemy 2, Alembic, Uvicorn | Auth, financial rules, ledger, loans, reports, admin |
-| Relational store | MySQL 8.x (InnoDB) | Users, persons, categories, interest schemes, loans, transactions, repayments |
-| Document store | MongoDB 6/7 | Voice metadata, audit logs, application events, FX rate cache |
+| Database | MySQL 8.x (InnoDB, native JSON) | Users, persons, categories, interest schemes, loans, transactions, repayments, voice metadata, audit/application events, FX cache |
 | Edge | Nginx + systemd | TLS termination, reverse proxy, service supervision |
 
 ```
@@ -31,11 +31,13 @@ Android phone
                         |
                         v
                 FastAPI / Uvicorn
-                   |         |
-                   |         +--> MongoDB (voice, audit, events, FX cache)
-                   +------------> MySQL 8.x (authoritative ledger)
-                                        |
-                                        +--> exchange-rate provider (HTTPS)
+                          |
+                          v
+                  MySQL 8.x (single database)
+                  ledger, loans, users, categories,
+                  voice metadata, audit/events, FX cache
+                          |
+                          +--> exchange-rate provider (HTTPS)
 ```
 
 ## Features
@@ -68,13 +70,13 @@ dbms_el/
       api/                    routes, dependencies, error handlers
       business_rules/         pure financial validation
       core/                   config, enums, security, time, errors
-      database/               MySQL session + MongoDB client
-      models/                 SQLAlchemy ORM
+      database/               MySQL engine, session and pool settings
+      models/                 SQLAlchemy ORM (ledger + supporting tables)
       repositories/           user-scoped SQL queries
       schemas/                Pydantic v2 request/response models
       services/               transactions, ledger, dashboard, admin
-      scripts/                demo seed, password hash, Mongo init
-    alembic/                  migrations 0001_initial, 0002_dbms_layer
+      scripts/                demo seed, password hash, legacy export importer
+    alembic/                  migrations 0001, 0002_dbms_layer, 0003_supporting_tables
     deployment/               Nginx, systemd, Pi checklist
     sql/                      schema, views, seed, 12 demo queries
     tests/                    unit, HTTP contract, optional integration
@@ -91,10 +93,9 @@ cd rpi_server
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements-dev.txt
-cp .env.example .env          # set MySQL, MongoDB, JWT secret
-alembic upgrade head
+cp .env.example .env          # set MySQL credentials and JWT secret
+alembic upgrade head          # includes 0003_supporting_tables
 python -m app.scripts.seed_demo
-python -m app.scripts.init_mongo   # create collections and indexes
 uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
@@ -231,22 +232,23 @@ flutter analyze
 flutter test
 ```
 
-Latest verification: server `62 passed` against live MySQL 8.0.46 and MongoDB
-7.0.37, including the canonical `/commands` success, replay, rejection and audit
-path, cross-user isolation, admin password checks, database constraints and live
-USD-to-INR conversion; Flutter `57 passed`, analyzers clean, and a signed release
-APK builds successfully. The live services also passed
-`integrations/pi_smoke_test.sh` end to end. Earlier DBMS validation applied and
-rolled back both Alembic migrations, loaded both seed paths independently, and
-executed all 12 demo queries. SQLite is deliberately not supported because the
-project targets MySQL semantics. The physical Raspberry Pi/Android smoke test
-remains deployment-specific.
+Server tests (`66 passed, 2 skipped`; the two skips are gated live-integration
+tests) pass, including the canonical `/commands`
+success, replay, rejection and audit path, cross-user isolation, admin password
+checks, database constraints, live USD-to-INR conversion, voice upsert
+idempotency and FX cache expiry; Flutter `57 passed`, analyzers clean, and a
+signed release APK builds successfully. The live services also passed
+`integrations/pi_smoke_test.sh` end to end. DBMS validation applied and rolled
+back the Alembic migrations, loaded both seed paths independently, and executed
+all 12 demo queries. SQLite is deliberately not supported because the project
+targets MySQL semantics. The physical Raspberry Pi/Android smoke test remains
+deployment-specific.
 
 ## Documentation
 
 - `docs/database/README.md` - DBMS quick reference, ER model, constraints, query map.
 - `docs/database-design.md` - detailed tables, keys, indexes, normalization,
-  concurrency, views and MongoDB usage.
+  concurrency, views and the four MySQL supporting tables.
 - `docs/architecture/README.md` - component and request-flow summary.
 - `docs/architecture.md` - detailed system architecture and security model.
 - `docs/api/README.md` - endpoint and error-envelope quick reference.

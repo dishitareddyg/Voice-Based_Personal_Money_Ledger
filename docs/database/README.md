@@ -4,15 +4,16 @@ Quick reference for the DBMS evaluation. The detailed design is in
 [`../database-design.md`](../database-design.md); the report text is in
 [`../dbms-report.md`](../dbms-report.md).
 
-## 1. Store split
+## 1. Single MySQL store
 
-| Store | Data | Authority |
+| Area | Tables | Authority |
 | --- | --- | --- |
-| MySQL 8.0.18+ / InnoDB | users, persons, categories, interest schemes, loans, transactions, repayments | System of record for every financial fact |
-| MongoDB 6/7 | `voice_commands`, `audit_logs`, `application_events`, `exchange_rates` | Supplementary metadata, events and cache only |
+| Core ledger | `users`, `persons`, `categories`, `interest_schemes`, `loans`, `transactions`, `repayments` | System of record for every financial fact |
+| Supporting | `VOICE_COMMAND`, `AUDIT_LOG`, `APPLICATION_EVENT`, `EXCHANGE_RATE_CACHE` | Audit trail, voice metadata, operational events and FX cache |
 
-Balances are always derived from MySQL. MongoDB is never used to compute a
-balance or validate a loan.
+MySQL 8.0 / InnoDB is the only database server. Balances are always derived from
+the ledger tables; the supporting tables never hold money that affects a
+balance. There is no MongoDB, Redis or other store in the deployment.
 
 ## 2. Schema
 
@@ -66,6 +67,19 @@ for queries without violating 3NF.
 The circular pair (`loans.source_transaction_id` and `transactions.loan_id`) is
 created with one `ALTER TABLE` after both tables exist.
 
+### Supporting tables
+
+| Table | Key and uniqueness | Purpose |
+| --- | --- | --- |
+| `VOICE_COMMAND` | `UNIQUE(user_id, request_id)` | Confirmed transcript, parser confidence, optional transaction link and `JSON` NLP metadata; upsert makes voice retries idempotent |
+| `AUDIT_LOG` | `(event_type, request_id, user_id, created_at)` dedupe | Auth, write and admin audit events; `payload` is `JSON` |
+| `APPLICATION_EVENT` | same shape as `AUDIT_LOG` | Startup, shutdown, migration and maintenance events |
+| `EXCHANGE_RATE_CACHE` | `UNIQUE(base_currency, target_currency)` | `DECIMAL(18,8)` rate, provider, `retrieved_at`, `valid_until` for expiry |
+
+Supporting writes use an independent `SessionLocal()` so a failed audit or voice
+write never rolls back a committed financial transaction. They are best-effort
+by design.
+
 ## 4. Indexes
 
 | Index | Use |
@@ -81,6 +95,11 @@ created with one `ALTER TABLE` after both tables exist.
 | `repayments(user_id, payment_date)` | repayment history |
 | `repayments(loan_id, payment_date)` | per-loan progress |
 | `categories(user_id, type)` | directory filters |
+| `VOICE_COMMAND(user_id, created_at)` | recent voice history per user |
+| `AUDIT_LOG(user_id, created_at)` | user audit trail |
+| `AUDIT_LOG(event_type, created_at)` | admin event filters |
+| `APPLICATION_EVENT(event_type, created_at)` | operational event filters |
+| `EXCHANGE_RATE_CACHE(valid_until)` | expiry cleanup |
 
 ## 5. Concurrency and idempotency
 
@@ -135,9 +154,8 @@ Alembic + Python seed (normal application setup):
 
 ```bash
 cd rpi_server
-alembic upgrade head
+alembic upgrade head          # includes 0003_supporting_tables
 python -m app.scripts.seed_demo
-python -m app.scripts.init_mongo
 ```
 
 Reference SQL path (for the DBMS evaluation):
@@ -149,6 +167,24 @@ mysql -u root -p voice_ledger < rpi_server/sql/seed/001_seed.sql
 ```
 
 `0002_dbms_layer` adds compounding frequency, CHECK constraints, composite
-indexes, the balance/loan reporting views and the typed views. Existing rows
-must satisfy the new constraints before upgrading; a fresh installation is the
-verified path.
+indexes, the balance/loan reporting views and the typed views. `0003_supporting_tables`
+creates `VOICE_COMMAND`, `AUDIT_LOG`, `APPLICATION_EVENT` and
+`EXCHANGE_RATE_CACHE` without altering or dropping the financial tables. Existing
+rows must satisfy the new constraints before upgrading; a fresh installation is
+the verified path.
+
+### Legacy document-store export
+
+If an older install has supporting documents to keep, export each collection to
+JSON Lines before decommissioning it and import after the migration:
+
+```bash
+cd rpi_server
+.venv/bin/python -m app.scripts.import_legacy_supporting_export \
+  --source-dir /var/backups/voice_ledger/legacy_export
+```
+
+The importer expects `voice_commands.jsonl`, `audit_logs.jsonl`,
+`application_events.jsonl` and `exchange_rates.jsonl`. It is resumable and never
+writes the financial tables. See the deployment guide for the `mongoexport`
+commands.

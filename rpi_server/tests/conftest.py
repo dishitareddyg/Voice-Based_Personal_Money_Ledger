@@ -1,8 +1,10 @@
 """Test configuration.
 
 Environment variables are set before the application (and its database engine)
-is imported. Unit tests never open a MySQL or MongoDB connection; tests marked
-``integration`` require RUN_INTEGRATION=1 and live services.
+is imported. Pure unit tests never open a database connection. Tests that use the
+``mysql_db`` fixture need a reachable MySQL 8 (TEST_DATABASE_URL) and skip
+themselves otherwise (set REQUIRE_MYSQL=1 to make that a failure). Tests
+marked ``integration`` additionally require RUN_INTEGRATION=1.
 """
 
 from __future__ import annotations
@@ -28,3 +30,48 @@ from app.main import app
 def client() -> TestClient:
     with TestClient(app) as test_client:
         yield test_client
+
+
+@pytest.fixture(scope="session")
+def mysql_db():
+    """Migrate the test database to head; skip if MySQL is unreachable."""
+    from alembic.config import Config
+    from sqlalchemy import text
+
+    from alembic import command
+    from app.database.mysql.session import engine
+
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+    except Exception as exc:
+        if os.getenv("REQUIRE_MYSQL") == "1":
+            raise
+        pytest.skip(f"MySQL test database unreachable: {exc}")
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    config = Config(os.path.join(root, "alembic.ini"))
+    config.set_main_option("script_location", os.path.join(root, "alembic"))
+    command.upgrade(config, "head")
+    return engine
+
+
+@pytest.fixture()
+def make_user(mysql_db):
+    """Factory creating committed users (needed for FK-backed rows)."""
+    import uuid
+
+    from app.database.mysql.session import SessionLocal
+    from app.repositories import user_repository
+
+    def _make() -> int:
+        with SessionLocal() as db:
+            user = user_repository.create(
+                db,
+                full_name="Test User",
+                email=f"t-{uuid.uuid4().hex[:12]}@example.com",
+                password_hash="x",
+            )
+            db.commit()
+            return user.id
+
+    return _make

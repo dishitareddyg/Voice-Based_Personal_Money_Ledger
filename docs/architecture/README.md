@@ -11,14 +11,17 @@ Flutter Android app
   -> review screen -> POST /commands (intent JSON)
 
 Nginx (TLS) -> FastAPI / Uvicorn
-                 |-> MySQL 8.x: authoritative ledger, loans, repayments
-                 |-> MongoDB: voice metadata, audit/application events, FX cache
+                 |-> MySQL 8.x: ledger, loans, repayments, users, categories
+                 |              voice metadata, audit/events, FX cache
                  +-> exchange-rate provider (HTTPS)
 ```
 
 - The phone performs speech recognition and parsing. Raw audio is never sent.
 - FastAPI owns authentication, validation, balances, loan state and currency.
-- MySQL owns every financial fact; MongoDB is supplementary and best-effort.
+- MySQL is the single persistent store for financial facts and supporting data.
+- The four supporting tables (`VOICE_COMMAND`, `AUDIT_LOG`,
+  `APPLICATION_EVENT`, `EXCHANGE_RATE_CACHE`) are best-effort and never change a
+  balance.
 - Nginx terminates TLS and Uvicorn listens on loopback only.
 
 ## Write request
@@ -30,8 +33,9 @@ Nginx (TLS) -> FastAPI / Uvicorn
 5. The service starts a transaction, locks the user row, checks for a replay,
    resolves person/category, validates rules, inserts the ledger row and any
    loan/repayment rows, then commits.
-6. Audit/voice/application events are written to MongoDB after commit; a rejected
-   command writes `transaction_rejected` to `audit_logs` without a ledger row.
+6. Audit/voice/application events are written to MySQL after commit through an
+   independent session; a rejected command writes `transaction_rejected` to
+   `AUDIT_LOG` without a ledger row.
 7. The response returns the stored transaction and recomputed balance.
 
 ## Balance and loans

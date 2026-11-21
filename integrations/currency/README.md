@@ -8,7 +8,7 @@ uses a synchronous provider lookup and never invents a rate.
 ```text
 INR -> rate = 1, no network
 other currency
-  -> MongoDB exchange_rates: unexpired (base, target=INR)?
+  -> MySQL EXCHANGE_RATE_CACHE: unexpired (base, target=INR)?
   -> provider GET {EXCHANGE_RATE_BASE_URL}/{BASE}
        rates["INR"] -> Decimal rate
        upsert cache with retrieved_at / valid_until / provider
@@ -29,10 +29,10 @@ cd /opt/voice-ledger/rpi_server
 .venv/bin/python ../integrations/currency/check_rate.py USD
 ```
 
-The command prints the live rate and the resulting MongoDB cache document. A
-provider outage exits with status `2` and `EXCHANGE_RATE_UNAVAILABLE`; the
-server never substitutes a stale rate. Use `--target EUR` to check another
-target, though ledger writes always target INR.
+The command prints the live rate and the resulting MySQL
+`EXCHANGE_RATE_CACHE` row. A provider outage exits with status `2` and
+`EXCHANGE_RATE_UNAVAILABLE`; the server never substitutes a stale rate. Use
+`--target EUR` to check another target, though ledger writes always target INR.
 
 ## Configuration
 
@@ -41,21 +41,23 @@ target, though ledger writes always target INR.
 | `EXCHANGE_RATE_BASE_URL` | provider root, e.g. `https://open.er-api.com/v6/latest` |
 | `EXCHANGE_RATE_CACHE_MINUTES` | cache validity window |
 
-## Cache document
+## Cache row
 
 ```json
 {
   "base_currency": "USD",
   "target_currency": "INR",
-  "rate": {"$numberDecimal": "83.12000000"},
+  "rate": "83.12000000",
   "provider": "open.er-api.com",
-  "retrieved_at": "2026-10-20T05:00:00Z",
-  "valid_until": "2026-10-20T06:00:00Z"
+  "retrieved_at": "2026-10-20T05:00:00",
+  "valid_until": "2026-10-20T06:00:00"
 }
 ```
 
-Indexes: unique `(base_currency, target_currency)`, plus retrieval/expiry
-indexes. `PRUNE_RATE_CACHE` removes expired entries.
+`rate` is `DECIMAL(18,8)`. The unique key `(base_currency, target_currency)`
+makes the upsert idempotent, and an index on `valid_until` supports cleanup.
+`PRUNE_RATE_CACHE` deletes expired rows. An expired row is never treated as a
+valid rate.
 
 ## Failure behavior
 

@@ -14,7 +14,7 @@ from app.core.bootstrap import bootstrap_admin
 from app.core.config import get_settings
 from app.core.context import set_request_id
 from app.core.logging import configure_logging
-from app.database.mongodb.client import get_mongo_database
+from app.database.mysql.session import dispose_engine
 
 logger = logging.getLogger(__name__)
 
@@ -29,14 +29,10 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             bootstrap_admin()
         except Exception as exc:  # the API can still start and report health
             logger.warning("Administrator bootstrap failed: %s", exc)
-        try:
-            get_mongo_database().ensure_indexes()
-        except Exception as exc:
-            logger.warning("MongoDB indexes were not ensured: %s", exc)
 
     yield
 
-    get_mongo_database().close()
+    dispose_engine()
 
 
 def create_app() -> FastAPI:

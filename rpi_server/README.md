@@ -2,21 +2,22 @@
 
 FastAPI backend for the Voice-Enabled Personal Financial Ledger. It is the only
 component allowed to write financial data, calculate balances, manage loans and
-convert currencies. The Flutter client never talks to MySQL or MongoDB.
+convert currencies. The Flutter client never talks to the database.
 
 ```text
 Flutter app --HTTPS/JSON--> Nginx --> FastAPI (Uvicorn)
-                                      |--> MySQL 8.x   authoritative ledger
-                                      |--> MongoDB     voice/audit/events/FX
+                                      |--> MySQL 8.x   the single database:
+                                      |                ledger, auth, audit,
+                                      |                voice metadata, events,
+                                      |                FX cache
                                       +--> exchange-rate API
 ```
 
 ## Requirements
 
-- Raspberry Pi 4B (2 GB+), Raspberry Pi OS 64-bit
+- Raspberry Pi 4B (2 GB is enough), Raspberry Pi OS 64-bit
 - Python 3.11+
 - MySQL 8.0.18+
-- MongoDB 6/7
 - Nginx (TLS termination)
 - Internet access for live exchange rates (optional if all amounts are INR)
 
@@ -28,10 +29,9 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements-dev.txt
 cp .env.example .env
-# edit .env: MySQL/MongoDB credentials, JWT_SECRET_KEY, optional admin bootstrap
+# edit .env: MySQL credentials, JWT_SECRET_KEY, optional admin bootstrap
 alembic upgrade head
 python -m app.scripts.seed_demo
-python -m app.scripts.init_mongo
 uvicorn app.main:app --reload --port 8000
 ```
 
@@ -42,7 +42,7 @@ Health endpoints are intentionally outside the API prefix:
 | Endpoint | Meaning |
 | --- | --- |
 | `GET /health` | process is alive |
-| `GET /health/ready` | MySQL and MongoDB reachable (503 when degraded) |
+| `GET /health/ready` | MySQL reachable (503 when degraded) |
 
 ## Configuration
 
@@ -52,7 +52,7 @@ All settings are read from environment variables or `.env` (see
 | Variable | Purpose |
 | --- | --- |
 | `DATABASE_URL` / `MYSQL_*` | MySQL connection (URL wins) |
-| `MONGODB_URI`, `MONGODB_DATABASE` | voice metadata, audit, events, FX cache |
+| `DB_POOL_SIZE`, `DB_MAX_OVERFLOW` | per-worker connection pool (default 5 + 5) |
 | `JWT_SECRET_KEY` | token signing; use 64 random bytes in production |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | access-token lifetime (default 12 h) |
 | `EXCHANGE_RATE_BASE_URL` | provider root; rate endpoint is `{root}/{BASE}` |
@@ -128,11 +128,11 @@ with the typed endpoints.
 
 | Action | Effect |
 | --- | --- |
-| `DATABASE_STATS` | row counts, table sizes, MySQL version, Mongo counts |
+| `DATABASE_STATS` | row counts, table sizes, MySQL version, supporting-table counts (`details.supporting_tables`) |
 | `RUN_MIGRATIONS` | `alembic upgrade head` (subprocess) |
 | `CREATE_BACKUP` | `mysqldump --single-transaction` into `BACKUP_DIR` |
 | `OPTIMIZE_INDEXES` | `ANALYZE TABLE` for the fixed table whitelist |
-| `PRUNE_RATE_CACHE` | deletes expired MongoDB exchange-rate documents |
+| `PRUNE_RATE_CACHE` | deletes expired rows from `EXCHANGE_RATE_CACHE` |
 
 There is deliberately no arbitrary SQL endpoint. Passwords are verified with
 Argon2id and are never logged.
@@ -172,14 +172,14 @@ during writes and duplicate requests return the original transaction with
 
 Amounts are stored in INR. For non-INR input the server fetches a live rate,
 stores it on the transaction (`original_amount`, `original_currency`,
-`exchange_rate_to_inr`), and caches it in MongoDB `exchange_rates`. INR returns
+`exchange_rate_to_inr`), and caches it in MySQL `EXCHANGE_RATE_CACHE` (`DECIMAL(28,12)`, one row per pair, expiring after `EXCHANGE_RATE_CACHE_MINUTES`). INR returns
 rate `1` without any network call. If no rate is available the request fails
 with `EXCHANGE_RATE_UNAVAILABLE` (503); the server never invents a rate.
 
 ## Database design
 
 MySQL tables: `users`, `persons`, `categories`, `interest_schemes`, `loans`,
-`transactions`, `repayments`.
+`transactions`, `repayments`, plus the four supporting tables below.
 
 - `transactions` is the single ledger; all money movements are rows here.
 - `income`, `expenses` and `savings` are read-only typed views over
@@ -196,17 +196,20 @@ MySQL tables: `users`, `persons`, `categories`, `interest_schemes`, `loans`,
   (`user_id + transaction_date`, `user_id + type`, `user_id + category_id`,
   `user_id + person_id`).
 
-MongoDB collections:
+Supporting tables (migration `0003_support_tables`; names are upper case and
+case-sensitive on Linux):
 
-| Collection | Purpose |
-| --- | --- |
-| `voice_commands` | confirmed text, parser confidence, extraction metadata |
-| `audit_logs` | login, committed/rejected financial writes and admin audit trail |
-| `application_events` | auth, lifecycle and operational events |
-| `exchange_rates` | short-lived FX cache |
+| Table | Purpose | Key constraints / indexes |
+| --- | --- | --- |
+| `VOICE_COMMAND` | confirmed text, parser confidence, extraction metadata (`nlp` JSON) | `UNIQUE (user_id, request_id)` for idempotency; FK `user_id` (CASCADE), `transaction_id` (SET NULL); index `(user_id, created_at)` |
+| `AUDIT_LOG` | login, committed/rejected financial writes and admin audit trail (`payload` JSON) | FK `user_id` (SET NULL); indexes `(user_id, created_at)`, `request_id`, `(event_type, created_at)` |
+| `APPLICATION_EVENT` | auth, lifecycle and operational events (`payload` JSON) | same shape and indexes as `AUDIT_LOG` |
+| `EXCHANGE_RATE_CACHE` | short-lived FX cache | `UNIQUE (base_currency, target_currency)`; index `valid_until` for pruning |
 
-Audio is never uploaded or stored. Mongo writes are best-effort and never roll
-back a committed MySQL transaction.
+Audio is never uploaded or stored. Audit, event and voice-command writes are
+best-effort: each uses its own short session/transaction, failures are logged
+and never raised, and they never roll back a committed financial transaction.
+User isolation is by `user_id`.
 
 Reference DDL: `sql/schema/001_schema.sql`, views: `sql/schema/002_views.sql`,
 seed data: `sql/seed/001_seed.sql`, and 12 report queries in
@@ -252,18 +255,22 @@ RUN_INTEGRATION=1 pytest -m integration
 ```
 
 Unit tests cover Argon2/JWT, financial rules, Pydantic validation, the currency
-cache, calendar bounds, error envelopes, SQL assets and the Flutter API
-contract (paths and response keys). Integration tests require live MySQL and
-MongoDB; SQLite is not supported. The live suite currently passes 62 tests on
-MySQL 8.0.46 and MongoDB 7.0.37, including auth failures, isolation, admin
-verification, constraint enforcement and live FX conversion.
+service, calendar bounds, error envelopes, SQL assets and the Flutter API
+contract (paths and response keys). `tests/test_support_store.py` and the
+integration tests need a live MySQL 8 (SQLite is not supported); the
+former skip themselves when MySQL is unreachable (`REQUIRE_MYSQL=1` makes that
+an error). They cover audit persistence, voice-command idempotency, user
+isolation, FX cache expiry and fallback, admin statistics, and model/migration
+parity.
 
 ## Deployment
 
 - `deployment/voice-ledger-api.service` - systemd unit
 - `deployment/nginx.conf` - HTTPS reverse proxy
+- `deployment/mysql/my.cnf` - MySQL tuning for a 2 GB Raspberry Pi
 - `deployment/README.md` - Raspberry Pi installation checklist
+- `migration/legacy_mongo/` - optional one-off import of data exported from the retired document store
 
-Run Uvicorn bound to `127.0.0.1` behind Nginx. Do not expose MySQL, MongoDB or
+Run Uvicorn bound to `127.0.0.1` behind Nginx. Do not expose MySQL or
 port 8000 to the internet. Back up with `CREATE_BACKUP` (or a nightly cron job)
 and store copies off the Pi.

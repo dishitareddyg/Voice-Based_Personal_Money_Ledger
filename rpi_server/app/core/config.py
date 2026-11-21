@@ -34,10 +34,10 @@ class Settings(BaseSettings):
     mysql_database: str = "voice_ledger"
     mysql_charset: str = "utf8mb4"
 
-    # MongoDB ---------------------------------------------------------------
-    mongodb_uri: str = "mongodb://127.0.0.1:27017"
-    mongodb_database: str = "voice_ledger_analytics"
-    mongodb_timeout_ms: int = 3000
+    # Connection pool, sized for a 2 GB Raspberry Pi: each Uvicorn worker keeps
+    # at most db_pool_size + db_max_overflow connections (see my.cnf).
+    db_pool_size: int = 5
+    db_max_overflow: int = 5
 
     # Auth ------------------------------------------------------------------
     jwt_secret_key: str = "change-me-to-a-long-random-secret"

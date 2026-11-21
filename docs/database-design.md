@@ -2,16 +2,18 @@
 
 ## 1. Overview
 
-The system uses a polyglot persistence split:
+The system uses a single MySQL 8 / InnoDB database:
 
-| Store | Data | Role |
+| Tables | Data | Role |
 | --- | --- | --- |
-| MySQL 8.x (InnoDB) | users, persons, categories, interest schemes, loans, transactions, repayments | System of record; all balances and financial invariants |
-| MongoDB 6/7 | `voice_commands`, `audit_logs`, `application_events`, `exchange_rates` | Confirmed voice metadata, audit trail, operational events and short-lived FX cache |
+| `users`, `persons`, `categories`, `interest_schemes`, `loans`, `transactions`, `repayments` | Core ledger | System of record; all balances and financial invariants |
+| `VOICE_COMMAND`, `AUDIT_LOG`, `APPLICATION_EVENT`, `EXCHANGE_RATE_CACHE` | Supporting data | Confirmed voice metadata, audit trail, operational events and short-lived FX cache |
 
-MySQL owns anything that must be correct after a crash. MongoDB documents are
-supplementary: event/voice write failures are logged and ignored, and a cache
-miss simply triggers a provider lookup.
+The financial tables own anything that must be correct after a crash. The four
+supporting tables are supplementary: their write failures are logged and
+ignored, and a cache miss simply triggers a provider lookup. They use MySQL
+`JSON` for payloads, indexed relational columns for queried fields and unique
+keys for idempotency. There is no second database server.
 
 ## 2. Entity-relationship diagram
 
@@ -361,88 +363,82 @@ queries.
 
 See `docs/database/README.md` for the file-to-feature map.
 
-## 10. MongoDB collections
+## 10. Supporting tables
 
-### `audit_logs`
+All four tables are created by migration `0003_supporting_tables`. They are
+written through an independent `SessionLocal()` after the financial commit, so a
+failure here is logged but never rolls back the ledger.
 
-```json
-{
-  "event_type": "transaction_created",
-  "user_id": 2,
-  "request_id": "5f1c...",
-  "created_at": "2026-10-20T05:34:21.100Z",
-  "ip_address": "192.168.1.20",
-  "user_agent": "okhttp/4.12",
-  "payload": {
-    "transaction_id": 42,
-    "transaction_type": "expense",
-    "amount_inr": "850.00",
-    "voice_text": "spent eight hundred and fifty rupees on groceries",
-    "parser_confidence": 0.93
-  }
-}
-```
+### `AUDIT_LOG`
 
-Indexes: `(user_id, created_at desc)`, `request_id`, `(event_type, created_at desc)`.
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | `BIGINT` PK | auto increment |
+| `user_id` | `BIGINT` FK `users.id` `ON DELETE SET NULL` | nullable for anonymous events |
+| `event_type` | `VARCHAR(120)` | e.g. `transaction_rejected`, `auth_login` |
+| `request_id` | `VARCHAR(64)` | nullable |
+| `created_at` | `DATETIME` | UTC, naive |
+| `ip_address` | `VARCHAR(45)` | IPv6-safe |
+| `user_agent` | `VARCHAR(512)` | nullable |
+| `payload` | `JSON` | transaction id, amount, voice text, confidence |
 
-### `voice_commands`
+Indexes: `(user_id, created_at)`, `(event_type, created_at)`, `request_id`.
+Rows survive user deletion so the security trail is not erased.
 
-```json
-{
-  "user_id": 2,
-  "request_id": "5f1c...",
-  "voice_text": "spent eight hundred and fifty rupees on groceries",
-  "parser_confidence": 0.93,
-  "transaction_id": 42,
-  "nlp": {
-    "intent": "expense",
-    "original_currency": "INR",
-    "amount": "850.00",
-    "category": "Groceries",
-    "person": null,
-    "repayment_direction": null
-  },
-  "source": "android_speech_recognizer",
-  "created_at": "2026-10-20T05:34:21.100Z"
-}
-```
+### `VOICE_COMMAND`
 
-Unique index `(user_id, request_id)` makes voice metadata idempotent. Audio is
-never stored.
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | `BIGINT` PK | auto increment |
+| `user_id` | `BIGINT` FK `users.id` `ON DELETE CASCADE` | required |
+| `request_id` | `VARCHAR(64)` | required |
+| `voice_text` | `TEXT` | confirmed transcript |
+| `parser_confidence` | `FLOAT` | `CHECK 0..1` or null |
+| `transaction_id` | `BIGINT` FK `transactions.id` `ON DELETE SET NULL` | optional link |
+| `nlp_metadata` | `JSON` | intent, amount, category, person, direction |
+| `source` | `VARCHAR(64)` | default `android_speech_recognizer` |
+| `created_at` | `DATETIME` | UTC, naive |
 
-### `application_events`
+`UNIQUE(user_id, request_id)` makes voice metadata idempotent; an
+`INSERT ... ON DUPLICATE KEY UPDATE` refreshes the row on retry. Audio is never
+stored. Additional indexes: `(user_id, created_at)`, `transaction_id`.
 
-Lightweight auth/lifecycle events (`auth_registered`, `auth_login`,
-`financial_transaction_committed`, `admin_action_completed`) with `user_id`,
-`request_id`, `created_at` and optional payload. Indexed by
-`(user_id, created_at desc)`, `(event_type, created_at desc)` and `request_id`.
+### `APPLICATION_EVENT`
 
-### `exchange_rates`
+Same shape as `AUDIT_LOG` (`id`, `user_id`, `event_type`, `request_id`,
+`created_at`, `ip_address`, `user_agent`, `payload`) but for lifecycle and
+operational events (`auth_registered`, `auth_login`,
+`financial_transaction_committed`, `admin_action_completed`). Indexes mirror
+`AUDIT_LOG`.
 
-```json
-{
-  "base_currency": "USD",
-  "target_currency": "INR",
-  "rate": {"$numberDecimal": "83.12000000"},
-  "provider": "open.er-api.com",
-  "retrieved_at": "2026-10-20T05:00:00Z",
-  "valid_until": "2026-10-20T06:00:00Z"
-}
-```
+### `EXCHANGE_RATE_CACHE`
 
-Indexes: unique `(base_currency, target_currency)` for the current cache entry,
-plus `(base_currency, target_currency, retrieved_at desc)` and
-`(base_currency, target_currency, valid_until desc)` for pruning. Expired
-documents are removed by the whitelisted `PRUNE_RATE_CACHE` admin action.
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | `BIGINT` PK | auto increment |
+| `base_currency` | `VARCHAR(3)` | `CHECK CHAR_LENGTH = 3` |
+| `target_currency` | `VARCHAR(3)` | `CHECK CHAR_LENGTH = 3` |
+| `rate` | `DECIMAL(18,8)` | `CHECK rate > 0` |
+| `provider` | `VARCHAR(255)` | e.g. `open.er-api.com` |
+| `retrieved_at` | `DATETIME` | UTC, naive |
+| `valid_until` | `DATETIME` | `CHECK valid_until > retrieved_at` |
+
+`UNIQUE(base_currency, target_currency)` identifies the current cache entry and
+makes the upsert idempotent. `(base_currency, target_currency, retrieved_at)` and
+`valid_until` support pruning. Expired rows are removed by the whitelisted
+`PRUNE_RATE_CACHE` admin action and are never used as a valid rate.
 
 ## 11. Backup and recovery
 
 - `CREATE_BACKUP` runs `mysqldump --single-transaction` into `BACKUP_DIR`, producing
   a consistent snapshot without blocking writes.
-- MongoDB is not authoritative; voice metadata, audit logs, application events and
-  the FX cache can be rebuilt or accepted as lost without affecting balances.
+- The dump includes the four supporting tables. They are not authoritative:
+  voice metadata, audit rows, application events and the FX cache can be lost
+  without affecting balances.
 - Recovery procedure: restore the latest SQL dump into MySQL, run
   `alembic upgrade head` to confirm schema version, then restart the API.
+- A legacy MongoDB JSONL export can be loaded with
+  `python -m app.scripts.import_legacy_supporting_export --source-dir ...`.
 - Demo seed and schema DDL allow a clean rebuild from an empty database.
 
 ## 12. Data dictionary summary

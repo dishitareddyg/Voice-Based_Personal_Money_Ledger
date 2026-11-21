@@ -1,7 +1,12 @@
 # Raspberry Pi deployment guide
 
-Target hardware: Raspberry Pi 4B (4 GB or more), Raspberry Pi OS 64-bit
-(Bookworm), Python 3.11+, MySQL 8.0, MongoDB 7.0 and Nginx.
+Target hardware: Raspberry Pi 4B, Raspberry Pi OS 64-bit
+(Bookworm), Python 3.11+, MySQL 8.0 and Nginx. MySQL is the only database
+(there is no MongoDB, Redis or container runtime).
+
+Target hardware: Raspberry Pi 4B with **2 GB RAM** is sufficient. Prefer an
+SSD/USB drive over an SD card for `/var/lib/mysql`: every API request writes
+audit rows.
 
 This guide installs MySQL 8.0 from Oracle's ARM64 generic tarball because the
 Oracle MySQL APT repository does not publish a `bookworm` ARM64 package.
@@ -41,26 +46,19 @@ sudo chown -R mysql:mysql /var/lib/mysql /var/lib/mysql-files \
     /var/log/mysql /var/run/mysqld
 ```
 
-Create `/etc/my.cnf`:
+Install the tuned configuration (the full file, with a memory budget, is in
+`deployment/mysql/my.cnf`; copy it from the cloned repository in step 4, or
+paste it now):
 
-```ini
-[mysqld]
-user=mysql
-basedir=/opt/mysql
-datadir=/var/lib/mysql
-socket=/var/run/mysqld/mysqld.sock
-pid-file=/var/run/mysqld/mysqld.pid
-bind-address=127.0.0.1
-mysqlx=0
-secure-file-priv=/var/lib/mysql-files
-character-set-server=utf8mb4
-collation-server=utf8mb4_0900_ai_ci
-default-time-zone='+00:00'
-log-error=/var/log/mysql/error.log
-
-[client]
-socket=/var/run/mysqld/mysqld.sock
+```bash
+sudo cp /opt/voice-ledger/rpi_server/deployment/mysql/my.cnf /etc/my.cnf
 ```
+
+Key settings for 2 GB: `innodb_buffer_pool_size=256M`, `performance_schema=OFF`,
+`max_connections=40`, `mysqlx=0`, `innodb_flush_method=O_DIRECT`, small
+per-connection buffers, binary logging off (nightly `mysqldump` is the backup),
+`bind-address=127.0.0.1`. Measured on MySQL 8.0.46 under a 300-request
+concurrent write load: mysqld ~240 MB RSS, API (parent + 2 workers) ~325 MB.
 
 Initialize the data directory. The temporary root password is written to
 `/var/log/mysql/error.log`:
@@ -124,34 +122,7 @@ sudo ss -ltnp | grep 3306
 
 `3306` must listen on `127.0.0.1`, not `0.0.0.0`.
 
-## 3. Install MongoDB 7.0 on ARM64
-
-```bash
-curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc | \
-  sudo gpg -o /usr/share/keyrings/mongodb-server-7.0.gpg --dearmor
-
-echo "deb [arch=arm64 signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg] \
-https://repo.mongodb.org/apt/debian bookworm/mongodb-org/7.0 main" | \
-  sudo tee /etc/apt/sources.list.d/mongodb-org-7.0.list
-
-sudo apt update
-sudo apt install -y mongodb-org
-sudo systemctl enable --now mongod
-mongod --version
-```
-
-Confirm `/etc/mongod.conf` contains:
-
-```yaml
-net:
-  port: 27017
-  bindIp: 127.0.0.1
-```
-
-MongoDB is supporting storage only. It can be rebuilt with `init_mongo`; never
-use it as the source of truth for money.
-
-## 4. Install the API
+## 3. Install the API
 
 ```bash
 sudo useradd --system --create-home --shell /usr/sbin/nologin voiceledger
@@ -179,8 +150,8 @@ MYSQL_PORT=3306
 MYSQL_USER=voice_ledger
 MYSQL_PASSWORD=replace-with-a-strong-app-password
 MYSQL_DATABASE=voice_ledger
-MONGODB_URI=mongodb://127.0.0.1:27017
-MONGODB_DATABASE=voice_ledger_analytics
+DB_POOL_SIZE=5
+DB_MAX_OVERFLOW=5
 JWT_SECRET_KEY=replace-with-a-64-byte-random-secret
 BACKUP_DIR=/var/backups/voice_ledger
 ```
@@ -191,12 +162,13 @@ Generate a JWT secret without printing it twice:
 python3 -c "import secrets; print(secrets.token_urlsafe(64))"
 ```
 
-Initialize both databases. Use the Alembic path or the reference SQL path, not
-both, on the same database:
+Create all tables (ledger plus `VOICE_COMMAND`, `AUDIT_LOG`,
+`APPLICATION_EVENT`, `EXCHANGE_RATE_CACHE`). Use the Alembic path or the
+reference SQL path (`sql/schema/001_schema.sql`), not both, on the same
+database:
 
 ```bash
-sudo -u voiceledger .venv/bin/alembic upgrade head
-sudo -u voiceledger .venv/bin/python -m app.scripts.init_mongo
+sudo -u voiceledger .venv/bin/alembic upgrade head      # or: python -m app.scripts.init_db
 ```
 
 Optional demo data:
@@ -213,7 +185,7 @@ Demo accounts created by the Python seed:
 The SQL seed in `sql/seed/001_seed.sql` uses the same demo accounts. Do not run
 both seeds against a fresh database because the IDs and emails overlap.
 
-## 5. Start the API with systemd
+## 4. Start the API with systemd
 
 ```bash
 cd /opt/voice-ledger/rpi_server
@@ -231,10 +203,11 @@ Logs:
 journalctl -u voice-ledger-api -f
 ```
 
-The unit starts only after MySQL and MongoDB. If either database is unavailable,
-`/health/ready` returns `503` and the app cannot serve financial data.
+The unit starts after MySQL. If MySQL is unavailable, `/health/ready` returns
+`503` and the app cannot serve financial data. The unit caps the API at
+`MemoryMax=600M` so it cannot starve MySQL.
 
-## 6. Nginx and HTTPS
+## 5. Nginx and HTTPS
 
 ```bash
 sudo cp deployment/nginx.conf /etc/nginx/sites-available/voice-ledger
@@ -272,9 +245,9 @@ HTTP and self-signed certificates are rejected. Use one of these options:
    cleartext traffic, and expose port 80 without the HTTPS redirect. This is a
    documented demo compromise, not the production configuration.
 
-Never expose MySQL `3306`, MongoDB `27017` or Uvicorn `8000` outside the Pi.
+Never expose MySQL `3306` or Uvicorn `8000` outside the Pi.
 
-## 7. Firewall
+## 6. Firewall
 
 ```bash
 sudo ufw allow 22/tcp
@@ -283,10 +256,9 @@ sudo ufw enable
 sudo ufw status
 ```
 
-Only SSH and HTTPS are public. MySQL, MongoDB and Uvicorn remain bound to
-loopback.
+Only SSH and HTTPS are public. MySQL and Uvicorn remain bound to loopback.
 
-## 8. Build and install the Android application
+## 7. Build and install the Android application
 
 Build on the development machine, not on the Pi:
 
@@ -338,7 +310,7 @@ Use forward slashes in `storeFile` on Windows, for example
 The repository currently builds a demo-signed APK with a local evaluation key.
 Replace it with a private keystore before publishing.
 
-## 9. Verification
+## 8. Verification
 
 From the Pi:
 
@@ -357,7 +329,6 @@ Run the live integration suite from the repository root:
 cd rpi_server
 RUN_INTEGRATION=1 \
 TEST_DATABASE_URL='mysql+pymysql://test:test@127.0.0.1:3306/voice_ledger_test?charset=utf8mb4' \
-MONGODB_URI='mongodb://127.0.0.1:27017' \
 pytest -q
 ```
 
@@ -376,7 +347,7 @@ Finally open the Android app, sign in as the demo user, record one income, one
 expense and one lending entry, and confirm the dashboard balance and calendar
 change.
 
-## 10. Backups and maintenance
+## 9. Backups and maintenance
 
 ```bash
 sudo -u voiceledger mkdir -p /var/backups/voice_ledger
@@ -389,12 +360,16 @@ sudo -u voiceledger sh -c "MYSQL_PWD='<app-password>' mysqldump \
 - Copy backups off the Pi.
 - Apply schema changes with `alembic upgrade head` or the admin
   `RUN_MIGRATIONS` action.
-- MongoDB is not authoritative; recreate indexes and collections with
-  `python -m app.scripts.init_mongo` after a rebuild.
+- Audit and event tables grow with use. Check sizes with the admin
+  `DATABASE_STATS` action; archive or trim old `AUDIT_LOG` /
+  `APPLICATION_EVENT` rows with SQL if needed (backups include them).
+- Upgrading from the MongoDB-based release: run `alembic upgrade head`, then
+  follow `migration/legacy_mongo/README.md` to import old data, and finally
+  `sudo systemctl disable --now mongod` and purge MongoDB.
 - Rotate `JWT_SECRET_KEY` only during a planned sign-out of all clients.
 - Do not upgrade the app user to MySQL `root`.
 
-## 11. Known deployment limitations
+## 10. Known deployment limitations
 
 - MySQL is installed from the generic ARM64 tarball because Oracle does not
   publish a Bookworm ARM64 APT package.

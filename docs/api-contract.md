@@ -82,7 +82,7 @@ their collection (`items`, `loans`, `repayments`, `persons`, `categories`, `days
 | Method | Path | Auth | Response |
 | --- | --- | --- | --- |
 | GET | `/health` | no | `{"status":"ok","service":"voice-ledger-api","time":"..."}` |
-| GET | `/health/ready` | no | 200 when MySQL and MongoDB respond, 503 otherwise |
+| GET | `/health/ready` | no | `200 {"status":"ready","checks":{"mysql":"ok"}}` when MySQL responds, `503 {"status":"degraded","checks":{"mysql":"unavailable"}}` otherwise |
 
 ## 3. Authentication
 
@@ -170,7 +170,7 @@ should send the canonical names.
 The response is the same `TransactionCreateResponse` documented below, including
 `amount_inr`, `exchange_rate_to_inr`, `available_balance` and idempotent replay
 flags. Business failures use the standard error envelope; rejected writes are also
-recorded in MongoDB `audit_logs` as `transaction_rejected`.
+recorded in MySQL `AUDIT_LOG` as `transaction_rejected`.
 
 ### Create a typed transaction
 
@@ -480,11 +480,11 @@ administrator's password and `confirm: true`.
     "database": "voice_ledger",
     "counts": { "users": 2, "transactions": 5 },
     "tables": [ { "table": "transactions", "rows": 5, "size_mb": 0.02 } ],
-    "mongodb": {
+    "supporting_tables": {
       "voice_commands": 4,
       "audit_logs": 12,
-      "exchange_rates": 3,
-      "application_events": 8
+      "application_events": 8,
+      "exchange_rate_cache": 3
     }
   }
 }
@@ -494,11 +494,11 @@ Whitelisted `action` values:
 
 | Action | Effect |
 | --- | --- |
-| `DATABASE_STATS` | row counts, MySQL version, table sizes, Mongo counts |
+| `DATABASE_STATS` | row counts, MySQL version, table sizes, supporting-table counts |
 | `RUN_MIGRATIONS` | `alembic upgrade head` in a subprocess |
 | `CREATE_BACKUP` | `mysqldump --single-transaction` into `BACKUP_DIR` |
 | `OPTIMIZE_INDEXES` | `ANALYZE TABLE` on the fixed table list |
-| `PRUNE_RATE_CACHE` | deletes expired FX cache documents |
+| `PRUNE_RATE_CACHE` | deletes expired `EXCHANGE_RATE_CACHE` rows |
 
 There is no endpoint that accepts raw SQL. Unknown actions fail schema validation.
 

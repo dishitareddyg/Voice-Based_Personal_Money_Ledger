@@ -2,27 +2,36 @@
 
 from __future__ import annotations
 
+import json
 import os
 
 import pytest
+from sqlalchemy import text
+
+from app.database.mysql.session import engine
 
 if os.getenv("RUN_INTEGRATION") != "1":
     pytest.skip(
-        "Set RUN_INTEGRATION=1 with live MySQL and MongoDB to run.",
+        "Set RUN_INTEGRATION=1 with live MySQL 8 to run.",
         allow_module_level=True,
     )
 
 pytestmark = pytest.mark.integration
 
 
+def _count(conn, table: str, request_id: str) -> int:
+    return conn.execute(
+        text(f"SELECT COUNT(*) FROM `{table}` WHERE request_id = :r"),
+        {"r": request_id},
+    ).scalar_one()
+
+
 def test_full_ledger_flow(client) -> None:
     import uuid
 
-    from app.database.mongodb.client import get_mongo_database
-
     ready = client.get("/health/ready")
     assert ready.status_code == 200, ready.text
-    assert ready.json()["checks"] == {"mysql": "ok", "mongodb": "ok"}
+    assert ready.json()["checks"] == {"mysql": "ok"}
 
     email = f"flow-{uuid.uuid4().hex[:10]}@example.com"
     registration = client.post(
@@ -146,26 +155,25 @@ def test_full_ledger_flow(client) -> None:
     assert statement["pagination"]["total"] == 4
 
     user_id = income["transaction"]["user_id"]
-    mongo = get_mongo_database().database
-    voice_documents = list(
-        mongo["voice_commands"].find({"user_id": user_id, "request_id": request_id})
-    )
-    assert len(voice_documents) == 1
-    assert voice_documents[0]["voice_text"] == voice_text
-    assert voice_documents[0]["transaction_id"] == income["transaction"]["id"]
-    assert mongo["audit_logs"].count_documents({"request_id": request_id}) == 1
-    assert (
-        mongo["application_events"].count_documents({"request_id": request_id})
-        == 1
-    )
+    with engine.connect() as conn:
+        voice_rows = conn.execute(
+            text(
+                "SELECT voice_text, transaction_id FROM VOICE_COMMAND "
+                "WHERE user_id = :u AND request_id = :r"
+            ),
+            {"u": user_id, "r": request_id},
+        ).all()
+        assert len(voice_rows) == 1
+        assert voice_rows[0][0] == voice_text
+        assert voice_rows[0][1] == income["transaction"]["id"]
+        assert _count(conn, "AUDIT_LOG", request_id) == 1
+        assert _count(conn, "APPLICATION_EVENT", request_id) == 1
 
 
 def test_voice_command_contract_end_to_end(client) -> None:
     """The documented intent payload records one row and audits rejections."""
 
     import uuid
-
-    from app.database.mongodb.client import get_mongo_database
 
     ready = client.get("/health/ready")
     assert ready.status_code == 200, ready.text
@@ -252,20 +260,26 @@ def test_voice_command_contract_end_to_end(client) -> None:
     statement = client.get("/api/v1/transactions", headers=headers).json()
     assert statement["pagination"]["total"] == 2
 
-    mongo = get_mongo_database().database
-    rejection_audit = mongo["audit_logs"].find_one(
-        {"request_id": rejected_id, "event_type": "transaction_rejected"}
-    )
-    assert rejection_audit is not None
-    assert rejection_audit["payload"]["error_code"] == "INSUFFICIENT_BALANCE"
-    assert rejection_audit["payload"]["transaction_type"] == "expense"
-    voice_documents = list(
-        mongo["voice_commands"].find(
+    with engine.connect() as conn:
+        rejection_audit = conn.execute(
+            text(
+                "SELECT payload FROM AUDIT_LOG WHERE request_id = :r "
+                "AND event_type = 'transaction_rejected'"
+            ),
+            {"r": rejected_id},
+        ).scalar_one()
+        rejection_audit = json.loads(rejection_audit)
+        assert rejection_audit["error_code"] == "INSUFFICIENT_BALANCE"
+        assert rejection_audit["transaction_type"] == "expense"
+        nlp = conn.execute(
+            text(
+                "SELECT nlp FROM VOICE_COMMAND "
+                "WHERE user_id = :u AND request_id = :r"
+            ),
             {
-                "user_id": expense_data["transaction"]["user_id"],
-                "request_id": expense_body["request_id"],
-            }
-        )
-    )
-    assert len(voice_documents) == 1
-    assert voice_documents[0]["nlp"]["intent"] == "expense"
+                "u": expense_data["transaction"]["user_id"],
+                "r": expense_body["request_id"],
+            },
+        ).all()
+        assert len(nlp) == 1
+        assert json.loads(nlp[0][0])["intent"] == "expense"

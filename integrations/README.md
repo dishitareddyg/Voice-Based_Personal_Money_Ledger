@@ -7,7 +7,7 @@ Runnable helpers for exercising the API outside the Flutter app.
 | `api_contracts/voice-ledger.http` | Request collection for VS Code REST Client / JetBrains HTTP Client |
 | `api_contracts/README.md` | How to run the collection |
 | `currency/README.md` | FX lookup, cache and failure behavior |
-| `currency/check_rate.py` | Live provider + MongoDB cache verification on the Pi |
+| `currency/check_rate.py` | Live provider + MySQL FX cache verification on the Pi |
 | `pi_smoke_test.sh` | End-to-end smoke test against a running Pi API |
 
 ## HTTP collection

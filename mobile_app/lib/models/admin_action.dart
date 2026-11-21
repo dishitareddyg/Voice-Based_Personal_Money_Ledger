@@ -34,7 +34,7 @@ enum AdminAction {
   pruneRateCache(
     command: 'PRUNE_RATE_CACHE',
     title: 'Prune expired rate cache',
-    description: 'Remove expired exchange-rate cache entries from MongoDB.',
+    description: 'Remove expired exchange-rate cache entries from MySQL.',
     icon: 'delete_sweep',
     isDestructive: true,
   );

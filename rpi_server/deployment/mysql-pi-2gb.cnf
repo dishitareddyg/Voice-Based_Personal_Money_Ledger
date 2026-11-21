@@ -1,0 +1,60 @@
+# ---------------------------------------------------------------------------
+# MySQL 8.0 configuration for a 2 GB Raspberry Pi 4B running the Voice Ledger
+# API (Nginx + Uvicorn + MySQL only, no other database servers).
+#
+# Install as /etc/my.cnf, then restart mysql. Numbers are intentionally
+# conservative: the OS, Python and the API need memory too. On a 4 GB Pi the
+# buffer pool may be raised to 512M; on 2 GB keep it at 256M.
+# ---------------------------------------------------------------------------
+
+[mysqld]
+user=mysql
+basedir=/opt/mysql
+datadir=/var/lib/mysql
+socket=/var/run/mysqld/mysqld.sock
+pid-file=/var/run/mysqld/mysqld.pid
+
+# Loopback only. Nginx is the only public listener.
+bind-address=127.0.0.1
+mysqlx=0
+skip-name-resolve=ON
+secure-file-priv=/var/lib/mysql-files
+
+# Character set and UTC timestamps.
+character-set-server=utf8mb4
+collation-server=utf8mb4_0900_ai_ci
+default-time-zone='+00:00'
+log-error=/var/log/mysql/error.log
+
+# --- Memory budget for a 2 GB Pi ------------------------------------------
+innodb_buffer_pool_size=256M
+innodb_buffer_pool_instances=1
+innodb_log_buffer_size=16M
+innodb_log_file_size=64M
+key_buffer_size=16M
+max_connections=30
+table_open_cache=128
+table_definition_cache=256
+thread_cache_size=8
+sort_buffer_size=1M
+join_buffer_size=1M
+read_buffer_size=512K
+read_rnd_buffer_size=512K
+tmp_table_size=16M
+max_heap_table_size=16M
+
+# Keep durability where it matters (transactions) but reduce unnecessary I/O.
+innodb_flush_method=O_DIRECT
+innodb_flush_log_at_trx_commit=1
+
+# Performance Schema is useful on servers, but it is pure overhead on a
+# single-household 2 GB deployment.
+performance_schema=OFF
+
+# Slow-query visibility without a heavy log volume.
+slow_query_log=ON
+slow_query_log_file=/var/log/mysql/slow.log
+long_query_time=1.0
+
+[client]
+socket=/var/run/mysqld/mysqld.sock

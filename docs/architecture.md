@@ -12,10 +12,11 @@ Design goals:
    conversion are computed on the Raspberry Pi, never trusted from the client.
 3. **Writes are idempotent.** A retried HTTP request must never create a second
    transaction.
-4. **Financial data and audit data have different shapes.** Structured, relational
-   records live in MySQL; event documents and caches live in MongoDB.
+4. **One durable store.** Financial facts and supporting metadata (audit, voice,
+   events, FX cache) all live in MySQL 8, with MySQL `JSON` for semi-structured
+   payloads and relational columns for everything queried.
 5. **The deployment fits a Raspberry Pi 4B.** No container orchestration, no
-   message broker, no external cache; Nginx, Uvicorn, MySQL and MongoDB only.
+   message broker, no external cache; Nginx, Uvicorn and MySQL only.
 6. **Administration is constrained.** Administrators run a fixed command set and
    there is no arbitrary SQL endpoint.
 
@@ -49,7 +50,7 @@ request
   -> service (financial rules, loan lifecycle, dashboard assembly)
   -> repository (user-scoped SQLAlchemy queries)
   -> MySQL
-       + best-effort audit event -> MongoDB
+       + best-effort audit/voice/event rows -> MySQL (separate session)
 ```
 
 | Layer | Files | Notes |
@@ -61,7 +62,7 @@ request
 | Models | `app/models/*` | SQLAlchemy 2 typed mappings |
 | Schemas | `app/schemas/*` | Pydantic v2 request/response contract |
 | Core | `app/core/*` | Config, enums, errors, JWT/Argon2, time, bootstrap |
-| Databases | `app/database/mysql`, `app/database/mongodb` | Engine/session and Mongo client |
+| Database | `app/database/mysql` | Engine, session factory and pool settings |
 
 ### Storage
 
@@ -73,20 +74,24 @@ request
 - loans and repayments,
 - optional reusable interest schemes.
 
-**MongoDB** stores:
+**MySQL supporting tables** store:
 
-- `voice_commands`: confirmed voice text, parser confidence and extraction metadata,
-- `audit_logs`: login, committed/rejected financial writes and admin audit events,
-- `application_events`: auth, lifecycle and operational events,
-- `exchange_rates`: short-lived FX cache keyed by base/target currency.
+- `VOICE_COMMAND`: confirmed voice text, parser confidence and extraction
+  metadata in a `JSON` column, unique on `(user_id, request_id)`,
+- `AUDIT_LOG`: login, committed/rejected financial writes and admin audit events,
+- `APPLICATION_EVENT`: auth, lifecycle and operational events,
+- `EXCHANGE_RATE_CACHE`: short-lived FX cache keyed by base/target currency with
+  a `DECIMAL(18,8)` rate and `valid_until`.
 
-MongoDB is never used to compute a balance. Losing voice metadata, an audit
-document or the FX cache does not change the ledger; losing MySQL data does.
+These tables are never used to compute a balance. Losing voice metadata, an
+audit row or the FX cache does not change the ledger; losing the financial
+tables does. Supporting writes use an independent `SessionLocal()` and are
+best-effort.
 
 ### Edge and supervision
 
 Nginx terminates TLS and proxies to Uvicorn bound on `127.0.0.1:8000`. A systemd
-unit restarts the API on failure. MySQL and MongoDB listen only on localhost.
+unit restarts the API on failure. MySQL listens only on localhost.
 
 ## 3. Voice-to-ledger flow
 
@@ -112,9 +117,9 @@ Properties:
 - Audio buffers stay in the speech plugin and are discarded.
 - The parser is deterministic and unit-tested; the same sentence yields the same
   command.
-- Voice text and confidence are stored in MongoDB `voice_commands` for metadata
-  and evaluation; they never affect the stored amount.
-- Rejected commands are recorded in `audit_logs` with the error code; no
+- Voice text and confidence are stored in `VOICE_COMMAND` for metadata and
+  evaluation; they never affect the stored amount.
+- Rejected commands are recorded in `AUDIT_LOG` with the error code; no
   financial row is committed.
 - If recognition is wrong, the user corrects the text before anything is sent.
 
@@ -137,9 +142,9 @@ A typical `POST /api/v1/expenses`:
    - apply business rules (sufficient balance, loan direction, overpayment),
    - insert the transaction, then loan/repayment rows,
    - commit.
-6. **Events** write best-effort MongoDB documents to `audit_logs`,
-   `application_events` and, when voice text is present, `voice_commands`.
-   Failures here are logged and ignored.
+6. **Events** write best-effort rows to `AUDIT_LOG`, `APPLICATION_EVENT` and,
+   when voice text is present, `VOICE_COMMAND` through an independent session.
+   Failures here are logged and ignored; the financial commit stands.
 7. **Response** returns `transaction`, `amount_inr`, optional `exchange_rate_to_inr`
    and the recomputed `available_balance`.
 
@@ -171,10 +176,10 @@ directions are rejected before any write.
 ```
 request(amount, currency)
   -> INR?  rate = 1, no network
-  -> Mongo cache hit and valid_until > now? use it
+  -> MySQL EXCHANGE_RATE_CACHE hit and valid_until > now? use it
   -> provider GET {EXCHANGE_RATE_BASE_URL}/{BASE}
        rates["INR"] -> Decimal rate
-       cache document with retrieved_at / valid_until
+       upsert cache row with retrieved_at / valid_until
   -> unavailable -> 503 EXCHANGE_RATE_UNAVAILABLE (never a made-up rate)
 ```
 
@@ -218,13 +223,16 @@ All failures use one envelope:
 | Input limits | Pydantic length/range checks, Nginx body limit |
 | Secrets | Environment variables / `.env`, excluded from git |
 | Voice privacy | No audio upload; text only after confirmation |
-| Audit | Mongo events for auth, writes and admin actions; no passwords logged |
+| Audit | MySQL `AUDIT_LOG` rows for auth, writes and admin actions; no passwords logged |
 
 ## 9. Availability and failure behavior
 
-- `/health` proves the process is alive; `/health/ready` checks MySQL and MongoDB.
-- Audit, application-event and voice-metadata writes are best-effort; a MongoDB
-  outage does not roll back a committed transaction (the API logs the failure).
+- `/health` proves the process is alive; `/health/ready` checks MySQL and
+  returns `{"status":"ready","checks":{"mysql":"ok"}}` or `503` with
+  `{"status":"degraded","checks":{"mysql":"unavailable"}}`.
+- Audit, application-event and voice-metadata writes are best-effort; a failure
+  in the supporting-table session does not roll back a committed transaction
+  (the API logs the failure).
 - If MySQL is unreachable, financial routes fail with `DATABASE_ERROR`; the client
   shows a retry message.
 - If the FX provider is unreachable, non-INR requests fail with
@@ -235,8 +243,9 @@ All failures use one envelope:
 
 - A normalized relational schema demonstrates keys, constraints, indexes, joins,
   aggregates, views, transactions and concurrency control.
-- MongoDB shows a deliberate polyglot split: append-only event documents and a TTL
-  cache instead of forcing every payload into tables.
+- The supporting tables show semi-structured data handled relationally: indexed
+  columns for queried fields, MySQL `JSON` for payloads, unique keys for
+  idempotency and an expiry index for the FX cache.
 - Server-side rules demonstrate that integrity is enforced in the database/service
   layer rather than in the UI.
 - Idempotency and row locking make the concurrency section concrete and testable.

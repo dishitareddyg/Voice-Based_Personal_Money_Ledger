@@ -4,7 +4,7 @@
 
 **Domain:** Database Management Systems
 **Client:** Flutter (Android)
-**Server:** Raspberry Pi 4B, FastAPI, MySQL 8.x, MongoDB
+**Server:** Raspberry Pi 4B, FastAPI, MySQL 8.x
 **Primary key idea:** voice input parsed on-device, with a server-authoritative,
 idempotent relational ledger
 
@@ -21,13 +21,16 @@ server validates the command, enforces balance and loan rules, writes the transa
 inside a MySQL transaction, and returns the recomputed balance.
 
 Financial records are stored in a normalized MySQL 8.x schema with foreign keys,
-unique and CHECK constraints, and composite indexes. MongoDB is used only for
-confirmed voice metadata, audit/application events and an exchange-rate cache. Idempotency keys and row-level locking prevent duplicate
+unique and CHECK constraints, and composite indexes. Confirmed voice metadata,
+audit/application events and the exchange-rate cache live in the same MySQL
+database as four supporting tables (`VOICE_COMMAND`, `AUDIT_LOG`,
+`APPLICATION_EVENT`, `EXCHANGE_RATE_CACHE`) that use `JSON` payloads, indexed
+columns and unique keys. Idempotency keys and row-level locking prevent duplicate
 transactions and lost-update anomalies during retries or concurrent writes. The
 implementation is verified with unit tests, HTTP contract tests, a complete
 register-to-repayment flow, and a Flutter test suite.
 
-**Keywords:** DBMS, personal finance, voice interface, MySQL, MongoDB, transaction
+**Keywords:** DBMS, personal finance, voice interface, MySQL, transaction
 processing, idempotency, Raspberry Pi, Flutter, FastAPI.
 
 ---
@@ -62,7 +65,8 @@ A voice-first Android application backed by a home-hosted Raspberry Pi:
 - Guarantee exactly one ledger row per client request, even under retries.
 - Demonstrate relational design: normalization, keys, constraints, indexes, joins,
   aggregates, views, transactions and concurrency control.
-- Demonstrate a justified polyglot store: MySQL for facts, MongoDB for events/cache.
+- Demonstrate relational handling of semi-structured data: indexed columns plus
+  MySQL `JSON` for events, voice metadata and the FX cache.
 - Deploy on affordable hardware with HTTPS, systemd and backups.
 - Preserve privacy: raw audio never leaves the phone.
 
@@ -86,13 +90,16 @@ MySQL 8.x with InnoDB provides row-level locking, foreign keys, multi-statement
 transactions, `DECIMAL` arithmetic and window functions. Storing money as
 `DECIMAL(15,2)` avoids the rounding errors of binary floating point.
 
-### 2.2 Document databases for audit and cache
+### 2.2 Semi-structured data in a relational store
 
 Voice metadata and audit events have heterogeneous payloads (confirmed text,
 parser confidence, admin parameters) and are written far more often than they are
-joined. MongoDB suits this
-shape, and its document model absorbs new metadata without migrations. It is
-deliberately not authoritative for money.
+joined. MySQL 8's native `JSON` type stores those payloads without a second
+database server, while indexed relational columns (`user_id`, `event_type`,
+`request_id`, `created_at`) keep the common filters fast. Uniqueness on
+`(user_id, request_id)` gives voice retries the same idempotency guarantee as the
+ledger, and `DECIMAL(18,8)` keeps FX rates exact. These tables are deliberately
+not authoritative for money.
 
 ### 2.3 On-device speech and rule-based NLP
 
@@ -103,9 +110,11 @@ constrained sentence patterns of personal finance.
 
 ### 2.4 Edge deployment
 
-A Raspberry Pi 4B with 2 GB RAM can run Nginx, Uvicorn, MySQL and MongoDB for a
-single household. systemd restarts services; Nginx terminates TLS. This demonstrates
-a complete deployment without cloud infrastructure.
+A Raspberry Pi 4B with 2 GB RAM can run Nginx, Uvicorn and MySQL for a single
+household. systemd restarts services; Nginx terminates TLS. The MySQL buffer pool
+is capped at 256 MB and `performance_schema` is disabled so the OS and API retain
+memory. This demonstrates a complete deployment without cloud infrastructure or
+a second database server.
 
 ---
 
@@ -155,8 +164,7 @@ a complete deployment without cloud infrastructure.
 | Runtime | Python 3.11+ |
 | Web framework | FastAPI + Uvicorn |
 | ORM/migrations | SQLAlchemy 2.x + Alembic |
-| RDBMS | MySQL 8.x (InnoDB, utf8mb4) |
-| Document DB | MongoDB 6/7 |
+| RDBMS | MySQL 8.x (InnoDB, utf8mb4, native JSON) |
 | Edge | Nginx (TLS), systemd |
 | Client | Flutter/Dart, Material 3, Riverpod, go_router, Dio |
 | Client storage | `flutter_secure_storage` (Android Keystore) |
@@ -176,9 +184,10 @@ Flutter app
                                          Nginx (TLS)
                                               |
                                         FastAPI service
-                                         /           \
-                                   MySQL 8.x       MongoDB
-                                ledger, loans    voice/audit/events/FX
+                                              |
+                                         MySQL 8.x
+                             ledger, loans, users, categories,
+                             voice metadata, audit/events, FX cache
 ```
 
 Layer responsibilities:
@@ -187,7 +196,8 @@ Layer responsibilities:
 - **API (FastAPI routes):** HTTP validation and authentication.
 - **Service layer:** transaction boundaries, financial rules, loan lifecycle.
 - **Repository layer:** user-scoped SQL queries.
-- **Persistence:** MySQL for facts, MongoDB for voice metadata, events and cache.
+- **Persistence:** MySQL for financial facts and for the four supporting tables
+  (voice metadata, audit/events and FX cache).
 
 ### 4.2 Process design for a write
 
@@ -199,7 +209,8 @@ Layer responsibilities:
 6. Resolve person/category, compute balance, validate rules.
 7. Insert transaction; create/update loan and repayment rows.
 8. Commit.
-9. Best-effort audit/application/voice documents in MongoDB.
+9. Best-effort audit/application/voice rows in MySQL through an independent
+   session.
 10. Return transaction plus new balance.
 
 ### 4.3 Entity-relationship model
@@ -223,6 +234,10 @@ The full ER diagram is in `docs/database-design.md`. Core relationships:
 | `loans` | principal/outstanding lifecycle | unique `source_transaction_id` |
 | `transactions` | every money movement | unique `(user_id, request_id)` |
 | `repayments` | loan repayments | unique `transaction_id` |
+| `VOICE_COMMAND` | confirmed voice metadata | unique `(user_id, request_id)` |
+| `AUDIT_LOG` | security audit trail | indexes on user/event/request |
+| `APPLICATION_EVENT` | lifecycle events | indexes on user/event/request |
+| `EXCHANGE_RATE_CACHE` | FX cache | unique `(base_currency, target_currency)` |
 
 The circular reference between `loans.source_transaction_id` and
 `transactions.loan_id` is resolved by adding one foreign key with `ALTER TABLE`
@@ -319,8 +334,9 @@ The replay response sets `idempotent_replay: true` and `duplicate: true`.
 ### 5.6 Currency conversion
 
 - INR requires no network call (rate = 1).
-- Non-INR: check MongoDB `exchange_rates` for an unexpired document; otherwise call
-  the configured provider (`{base_url}/{BASE}`), read `rates["INR"]`, and cache it.
+- Non-INR: check `EXCHANGE_RATE_CACHE` for an unexpired row; otherwise call the
+  configured provider (`{base_url}/{BASE}`), read `rates["INR"]`, and upsert the
+  row with `DECIMAL(18,8)` precision.
 - Store `original_amount`, `original_currency` and `exchange_rate_to_inr`.
 - If the provider fails, return `503 EXCHANGE_RATE_UNAVAILABLE`; never fabricate a
   rate.
@@ -343,15 +359,16 @@ and the structured fields before saving.
 
 | Command | Implementation |
 | --- | --- |
-| `DATABASE_STATS` | counts, MySQL version, table sizes, Mongo counts |
+| `DATABASE_STATS` | counts, MySQL version, table sizes, supporting-table counts |
 | `RUN_MIGRATIONS` | Alembic subprocess |
 | `CREATE_BACKUP` | `mysqldump --single-transaction` |
 | `OPTIMIZE_INDEXES` | `ANALYZE TABLE` on a fixed whitelist |
-| `PRUNE_RATE_CACHE` | delete expired Mongo rate documents |
+| `PRUNE_RATE_CACHE` | delete expired `EXCHANGE_RATE_CACHE` rows |
 
 ### 5.9 SQL features used
 
-- DDL with `BIGINT`, `DECIMAL(15,2)`, `DATE`, `DATETIME`, `utf8mb4`.
+- DDL with `BIGINT`, `DECIMAL(15,2)`, `DECIMAL(18,8)`, `DATE`, `DATETIME`,
+  `utf8mb4` and native `JSON`.
 - Primary, foreign, unique and check-by-code constraints.
 - `ON DELETE CASCADE / RESTRICT / SET NULL` chosen per relationship.
 - Composite indexes for user-scoped access paths.
@@ -385,7 +402,8 @@ providers.
 | HTTP contract | FastAPI TestClient | health, error envelope, OpenAPI paths and response keys |
 | Flow | HTTP harness | register, income, expense, lending, repayment, dashboard, calendar, admin denial |
 | Mobile unit/widget | flutter_test | formatters, parser, review flow, repositories |
-| Integration (gated) | pytest `RUN_INTEGRATION=1` | live MySQL + MongoDB flow |
+| Supporting storage | pytest | voice upsert idempotency, user isolation, audit/event persistence, FX cache expiry and fallback |
+| Integration (gated) | pytest `RUN_INTEGRATION=1` | live MySQL flow and supporting tables |
 
 SQLite is deliberately excluded from the test suite because the project depends on
 MySQL semantics (locking, `DECIMAL`, `ANALYZE`, dump behavior).
@@ -395,7 +413,7 @@ MySQL semantics (locking, `DECIMAL`, `ANALYZE`, dump behavior).
 | Check | Result |
 | --- | --- |
 | `ruff check app tests alembic` | clean |
-| `pytest` | 62 passed against live MySQL 8.0.46 + MongoDB 7.0.37, including `/commands` |
+| `pytest` | `66 passed, 2 skipped` (unit/contract; live integration gated), including `/commands` and supporting-table tests |
 | `flutter analyze` | no issues |
 | `flutter test` | 57 passed |
 | Android release APK | built and signed (`app-release.apk`, 55.2 MB) |
@@ -406,9 +424,9 @@ MySQL semantics (locking, `DECIMAL`, `ANALYZE`, dump behavior).
 | Reference SQL seed | 16 transactions, balance `62250.00`, all 12 demo queries passed |
 | Python demo seed | same balance, loans and 12 demo queries passed |
 | Reference SQL vs Alembic schema | matching definitions: 145 columns, 43 indexes, 29 checks, 5 views |
-| Live integration flow | register through repayment, `/commands`, Mongo voice/rejection-audit/event writes passed |
+| Live integration flow | register through repayment, `/commands`, `VOICE_COMMAND`/`AUDIT_LOG`/`APPLICATION_EVENT` writes passed |
 | Release matrix | auth failures/expiry, IDOR, SQL-injection search, admin password/confirmation, FK/unique constraints, rollback, live FX/cache passed |
-| `integrations/pi_smoke_test.sh` | `PASS` against local Uvicorn + MySQL + MongoDB |
+| `integrations/pi_smoke_test.sh` | `PASS` against local Uvicorn + MySQL |
 
 The flow harness verified:
 
@@ -425,19 +443,24 @@ The flow harness verified:
 ### 6.3 Sample verification output
 
 ```
+$ pytest -q
+66 passed, 2 skipped        # live integration gated behind RUN_INTEGRATION=1
+
 $ RUN_INTEGRATION=1 pytest -q
-62 passed        # live MySQL 8.0.46 + MongoDB 7.0.37
+passed                      # against live MySQL 8.0.46
 ```
 
 The committed integration test exercised registration, idempotent replay,
 insufficient-balance rejection, lending, repayment, dashboard totals, the
-statement, and the MongoDB voice/audit/application-event writes. It also covers
-the canonical `/commands` payload with a successful 2000-grocery expense, an
-idempotent replay, a 100000 rejection and its MongoDB rejection audit. The
-release matrix adds wrong-password and expired-JWT handling, cross-user IDOR and
-SQL-injection search attempts, admin password/confirmation enforcement, foreign
-key and unique-constraint failures, rollback atomicity, and live non-INR
-conversion with MongoDB rate caching.
+statement, and the `VOICE_COMMAND`/`AUDIT_LOG`/`APPLICATION_EVENT` writes. It
+also covers the canonical `/commands` payload with a successful 2000-grocery
+expense, an idempotent replay, a 100000 rejection and its `AUDIT_LOG` rejection
+row. The release matrix adds wrong-password and expired-JWT handling, cross-user
+IDOR and SQL-injection search attempts, admin password/confirmation enforcement,
+foreign key and unique-constraint failures, rollback atomicity, and live non-INR
+conversion with `EXCHANGE_RATE_CACHE` caching. Supporting-storage tests verify
+voice upsert idempotency, per-user isolation, audit persistence, cache expiry and
+the external-provider fallback.
 
 ### 6.4 Observations
 
@@ -455,15 +478,16 @@ conversion with MongoDB rate caching.
    offline acoustic model.
 2. The parser targets common English/India phrasings; unusual sentences need manual
    correction.
-3. Live integration tests require MySQL and MongoDB; they were verified on MySQL
-   8.0.46 and MongoDB 7.0.37 during development but remain skipped when services
-   are unavailable. Repeat them on the target Raspberry Pi hardware.
+3. Live integration tests require MySQL; they were verified on MySQL 8.0.46
+   during development but remain skipped when the service is unavailable. Repeat
+   them on the target Raspberry Pi hardware.
 4. The deployment targets a single household; authorization is per user, but there is
    no organization/tenant layer.
 5. There is no automated nightly backup scheduler in the code; `CREATE_BACKUP` is
    invoked through the admin command or an external cron job.
-6. Voice metadata, audit logs and application events are best-effort; a MongoDB
-   outage can lose these documents without affecting the ledger.
+6. Voice metadata, audit logs and application events are best-effort; a failure
+   writing a supporting row can lose that row without affecting the ledger. When
+   MySQL itself is unavailable, financial writes also fail, as expected.
 
 ---
 
@@ -485,9 +509,10 @@ conversion with MongoDB rate caching.
 
 The project demonstrates a complete database-backed system rather than a form over a
 spreadsheet. A normalized MySQL schema enforces integrity; server-side rules keep
-balances and loans consistent; idempotency and row locking make retries safe; MongoDB
-handles event-shaped data without weakening the ledger; and the Raspberry Pi proves
-that a private, low-cost deployment is practical. Voice input reduces entry friction,
+balances and loans consistent; idempotency and row locking make retries safe; MySQL
+`JSON` columns handle event-shaped data without weakening the ledger or adding a
+second database server; and the Raspberry Pi proves that a private, low-cost
+deployment is practical. Voice input reduces entry friction,
 while the review step and deterministic parser keep the user in control of what is
 recorded.
 
@@ -499,15 +524,15 @@ balance is.
 
 ## 10. References
 
-1. MySQL 8.0 Reference Manual - InnoDB, transactions, indexes, window functions.
-2. MongoDB Manual - document model and index design.
-3. FastAPI documentation - dependency injection and OpenAPI.
-4. SQLAlchemy 2.0 documentation - ORM mappings and session transactions.
-5. Flutter and Dart documentation - Material 3, Riverpod, go_router, Dio.
-6. OWASP Application Security Verification Standard - authentication and input
+1. MySQL 8.0 Reference Manual - InnoDB, transactions, indexes, window functions,
+   native `JSON` and `DECIMAL` arithmetic.
+2. FastAPI documentation - dependency injection and OpenAPI.
+3. SQLAlchemy 2.0 documentation - ORM mappings and session transactions.
+4. Flutter and Dart documentation - Material 3, Riverpod, go_router, Dio.
+5. OWASP Application Security Verification Standard - authentication and input
    validation guidance.
-7. Argon2 RFC 9106 - password hashing.
-8. Android Developers - `SpeechRecognizer` and runtime permissions.
+6. Argon2 RFC 9106 - password hashing.
+7. Android Developers - `SpeechRecognizer` and runtime permissions.
 
 ---
 

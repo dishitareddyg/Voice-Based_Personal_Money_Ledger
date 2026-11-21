@@ -21,6 +21,11 @@ def test_rejected_write_is_audited_and_reraised(monkeypatch) -> None:
     )
     user = SimpleNamespace(id=7)
     audit_calls: list[tuple[str, dict]] = []
+    order: list[str] = []
+
+    class StubSession:
+        def rollback(self) -> None:
+            order.append("rollback")
 
     monkeypatch.setattr(
         transaction_service.transaction_repository,
@@ -30,12 +35,15 @@ def test_rejected_write_is_audited_and_reraised(monkeypatch) -> None:
     monkeypatch.setattr(
         audit_service,
         "record_event",
-        lambda event_type, **kwargs: audit_calls.append((event_type, kwargs)),
+        lambda event_type, **kwargs: (
+            order.append("audit"),
+            audit_calls.append((event_type, kwargs)),
+        ),
     )
 
     with pytest.raises(AppError) as raised:
         transaction_service.create_transaction(
-            None,
+            StubSession(),
             user,
             payload,
             transaction_type=TransactionType.EXPENSE,
@@ -44,6 +52,8 @@ def test_rejected_write_is_audited_and_reraised(monkeypatch) -> None:
         )
 
     assert raised.value.code.value == "INVALID_AMOUNT"
+    # Row locks must be released before the (separate-session) audit write.
+    assert order == ["rollback", "audit"]
     assert len(audit_calls) == 1
     event_type, kwargs = audit_calls[0]
     assert event_type == "transaction_rejected"

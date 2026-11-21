@@ -2,56 +2,57 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from bson.decimal128 import Decimal128
+import httpx
+import pytest
 
+from app.core.errors import AppError
 from app.services import currency_service
-
-
-class FakeCollection:
-    def __init__(self, document: dict | None = None) -> None:
-        self.document = document
-        self.upserts: list[dict] = []
-
-    def find_one(self, *args: object, **kwargs: object):
-        return self.document
-
-    def update_one(self, key: dict, update: dict, upsert: bool = False):
-        self.upserts.append({"key": key, "update": update, "upsert": upsert})
 
 
 def test_inr_rate_is_one() -> None:
     assert currency_service.get_rate("INR", "INR") == Decimal("1")
 
 
-def test_cached_rate_is_used(monkeypatch) -> None:
-    collection = FakeCollection(
-        {"rate": Decimal128(Decimal("83.50000000"))}
+def test_cached_rate_is_used_without_provider_call(monkeypatch) -> None:
+    monkeypatch.setattr(
+        currency_service, "_read_cache", lambda b, t: Decimal("83.5")
     )
-    monkeypatch.setattr(currency_service, "_collection", lambda: collection)
-    assert currency_service.get_rate("usd") == Decimal("83.50000000")
-    assert collection.upserts == []
+
+    def boom(*_a):
+        raise AssertionError("provider must not be called on a cache hit")
+
+    monkeypatch.setattr(currency_service, "_fetch_rate", boom)
+    assert currency_service.get_rate("usd") == Decimal("83.5")
 
 
 def test_fetch_and_cache_when_missing(monkeypatch) -> None:
-    collection = FakeCollection(None)
-    monkeypatch.setattr(currency_service, "_collection", lambda: collection)
+    written: list[tuple] = []
+    monkeypatch.setattr(currency_service, "_read_cache", lambda b, t: None)
     monkeypatch.setattr(
-        currency_service, "_fetch_rate", lambda base, target: Decimal("84.25")
+        currency_service, "_fetch_rate", lambda b, t: Decimal("84.25")
     )
-    rate = currency_service.get_rate("EUR")
-    assert rate == Decimal("84.25")
-    assert collection.upserts
-    stored = collection.upserts[0]["update"]["$set"]
-    assert stored["base_currency"] == "EUR"
-    assert stored["target_currency"] == "INR"
-    assert stored["rate"] == Decimal128(Decimal("84.25"))
-    assert stored["valid_until"] > stored["retrieved_at"]
+    monkeypatch.setattr(
+        currency_service, "_write_cache", lambda *a: written.append(a)
+    )
+    assert currency_service.get_rate("EUR") == Decimal("84.25")
+    assert written and written[0][:3] == ("EUR", "INR", Decimal("84.25"))
 
 
-def test_fetch_failure_is_a_clear_error(monkeypatch) -> None:
-    import httpx
+@pytest.mark.parametrize(
+    "value", [Decimal("0"), Decimal("-1"), Decimal("NaN"), Decimal("1e20")]
+)
+def test_unusable_rates_are_rejected(value: Decimal) -> None:
+    assert currency_service._normalise_rate(value) is None
 
-    class BrokenClient:
+
+def test_rate_is_quantised_with_decimal_not_float() -> None:
+    rate = currency_service._normalise_rate(Decimal("0.0118929999999999"))
+    assert rate == Decimal("0.011893000000")
+    assert isinstance(rate, Decimal)
+
+
+def _client_returning(payload=None, error: Exception | None = None):
+    class FakeClient:
         def __init__(self, *args: object, **kwargs: object) -> None:
             pass
 
@@ -62,15 +63,33 @@ def test_fetch_failure_is_a_clear_error(monkeypatch) -> None:
             return None
 
         def get(self, url: str):
-            raise httpx.ConnectError("no network")
+            if error is not None:
+                raise error
+            request = httpx.Request("GET", url)
+            return httpx.Response(200, json=payload, request=request)
 
-    monkeypatch.setattr(currency_service.httpx, "Client", BrokenClient)
-    collection = FakeCollection(None)
-    monkeypatch.setattr(currency_service, "_collection", lambda: collection)
-    try:
+    return FakeClient
+
+
+def test_fetch_failure_is_a_clear_error(monkeypatch) -> None:
+    monkeypatch.setattr(
+        currency_service.httpx,
+        "Client",
+        _client_returning(error=httpx.ConnectError("no network")),
+    )
+    monkeypatch.setattr(currency_service, "_read_cache", lambda b, t: None)
+    with pytest.raises(AppError) as info:
         currency_service.get_rate("USD")
-    except Exception as exc:  # AppError
-        assert getattr(exc, "code").value == "EXCHANGE_RATE_UNAVAILABLE"
-        assert getattr(exc, "status_code") == 503
-    else:  # pragma: no cover
-        raise AssertionError("expected an exchange-rate error")
+    assert info.value.code.value == "EXCHANGE_RATE_UNAVAILABLE"
+    assert info.value.status_code == 503
+
+
+def test_missing_rate_in_provider_payload(monkeypatch) -> None:
+    monkeypatch.setattr(
+        currency_service.httpx,
+        "Client",
+        _client_returning({"rates": {"EUR": 1}}),
+    )
+    monkeypatch.setattr(currency_service, "_read_cache", lambda b, t: None)
+    with pytest.raises(AppError):
+        currency_service.get_rate("USD")

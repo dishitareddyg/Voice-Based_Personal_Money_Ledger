@@ -75,6 +75,7 @@ def create_transaction(
     ip_address: str | None = None,
     user_agent: str | None = None,
 ) -> TransactionCreateResponse:
+    user_id = user.id  # rollback below expires ORM attributes
     try:
         return _create_transaction(
             db,
@@ -85,8 +86,12 @@ def create_transaction(
             user_agent=user_agent,
         )
     except AppError as exc:
+        # Release the per-user row lock taken by SELECT ... FOR UPDATE before
+        # auditing: the audit row (own session) has a FK to users and would
+        # otherwise wait for this transaction.
+        db.rollback()
         _record_rejection(
-            user,
+            user_id,
             payload,
             transaction_type=transaction_type,
             error=exc,
@@ -309,7 +314,7 @@ def _create_transaction(
 
 
 def _record_rejection(
-    user: User,
+    user_id: int,
     payload: TransactionCreateBase,
     *,
     transaction_type: TransactionType,
@@ -321,7 +326,7 @@ def _record_rejection(
 
     audit_service.record_event(
         "transaction_rejected",
-        user_id=user.id,
+        user_id=user_id,
         request_id=payload.request_id,
         payload={
             "transaction_type": transaction_type.value,

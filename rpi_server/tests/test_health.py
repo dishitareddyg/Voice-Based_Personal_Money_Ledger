@@ -57,3 +57,40 @@ def test_openapi_is_available(client: TestClient) -> None:
     response = client.get("/openapi.json")
     assert response.status_code == 200
     assert response.json()["info"]["title"]
+
+
+def test_readiness_reports_mysql_only(client: TestClient) -> None:
+    from app.database.mysql.session import get_db
+
+    class OkSession:
+        def execute(self, *_a, **_k):
+            return None
+
+    app = client.app
+    app.dependency_overrides[get_db] = lambda: OkSession()
+    try:
+        response = client.get("/health/ready")
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+    assert response.status_code == 200
+    assert response.json() == {"status": "ready", "checks": {"mysql": "ok"}}
+
+
+def test_readiness_degraded_when_mysql_down(client: TestClient) -> None:
+    from app.database.mysql.session import get_db
+
+    class BrokenSession:
+        def execute(self, *_a, **_k):
+            raise RuntimeError("down")
+
+    app = client.app
+    app.dependency_overrides[get_db] = lambda: BrokenSession()
+    try:
+        response = client.get("/health/ready")
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+    assert response.status_code == 503
+    assert response.json() == {
+        "status": "degraded",
+        "checks": {"mysql": "unavailable"},
+    }
