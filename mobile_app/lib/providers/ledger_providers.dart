@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show debugPrint, debugPrintStack;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/calendar_month.dart';
@@ -13,7 +14,16 @@ import 'infrastructure_providers.dart';
 
 final dashboardSummaryProvider =
     FutureProvider.autoDispose<LedgerSummary>((ref) async {
-  return ref.watch(dashboardRepositoryProvider).fetchSummary();
+  try {
+    return await ref.watch(dashboardRepositoryProvider).fetchSummary();
+  } catch (error, stackTrace) {
+    // Temporary diagnostic. Do not log the financial response body.
+    debugPrint(
+      '[Dashboard] fetchSummary failed: ${error.runtimeType}: $error',
+    );
+    debugPrintStack(stackTrace: stackTrace, label: '[Dashboard] stack trace');
+    rethrow;
+  }
 });
 
 final dashboardCalendarProvider =
