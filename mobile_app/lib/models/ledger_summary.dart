@@ -40,11 +40,11 @@ class LedgerSummary {
   factory LedgerSummary.fromJson(Map<String, dynamic> json) {
     final activity = parseMap(json['recent_transactions']) ??
         parseMap(json['recentTransactions']);
-    final recentRaw = json['recent_transactions'] is List
-        ? json['recent_transactions']
-        : json['recentTransactions'] is List
-            ? json['recentTransactions']
-            : parseList(activity?['items']);
+    final List<dynamic> recentRaw = json['recent_transactions'] is List
+      ? json['recent_transactions'] as List<dynamic>
+      : json['recentTransactions'] is List
+          ? json['recentTransactions'] as List<dynamic>
+          : parseList(activity?['items']);
 
     return LedgerSummary(
       availableBalance: parseDouble(
@@ -73,7 +73,10 @@ class LedgerSummary {
       ),
       recentTransactions: recentRaw
           .whereType<Map>()
-          .map((item) => Transaction.fromJson(Map<String, dynamic>.from(item)))
+          .map<Transaction>(
+            (item) => 
+                Transaction.fromJson(Map<String, dynamic>.from(item)),
+          )
           .toList(growable: false),
       categoryBreakdown: parseList(
         json['category_breakdown'] ?? json['categoryBreakdown'],
