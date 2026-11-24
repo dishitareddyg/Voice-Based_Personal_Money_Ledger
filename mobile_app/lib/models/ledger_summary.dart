@@ -122,10 +122,14 @@ class UpcomingRepayment {
   bool get isReceivable => direction.toLowerCase() == 'received';
 
   factory UpcomingRepayment.fromJson(Map<String, dynamic> json) {
+    // The API may provide `person` as a string or omit it entirely. Treat it
+    // as a map only when it actually is one; dynamic ['name'] indexing on a
+    // non-map value throws and fails the whole dashboard summary parse.
+    final person = parseMap(json['person']);
     return UpcomingRepayment(
       id: parseString(json['id'] ?? json['repayment_id']),
       personName: parseString(
-        json['person_name'] ?? json['person']?['name'],
+        json['person_name'] ?? person?['name'],
         fallback: 'Unknown person',
       ),
       amount: parseDouble(json['amount'] ?? json['amount_inr']),
