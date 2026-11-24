@@ -42,3 +42,8 @@ backups/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# --- Android signing credentials ---
+mobile_app/android/key.properties
+*.jks
+*.keystore
